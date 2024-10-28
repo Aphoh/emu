@@ -52,22 +52,23 @@ class PrefixConstrainedLogitsProcessor(LogitsProcessor):
     ```
     """
 
-    def __init__(self, prefix_allowed_tokens_fn: Callable[[int, torch.Tensor], List[int]], num_beams: int):
+    def __init__(self, prefix_allowed_tokens_fn: Callable[[int, torch.Tensor], List[int]]):
         self._prefix_allowed_tokens_fn = prefix_allowed_tokens_fn
-        self._num_beams = num_beams
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        assert input_ids.shape[0] == scores.shape[0], f"input_ids {input_ids.shape} and scores {scores.shape} should have the same batch size."
+        assert input_ids.ndim == 2, f"input_ids should have 2 dimensions, but got {input_ids.ndim}."
+        assert scores.ndim == 2, f"scores should have 2 dimensions, but got {scores.ndim}."
         mask = torch.full_like(scores, -math.inf)
-        for batch_id, beam_sent in enumerate(input_ids.view(-1, self._num_beams, input_ids.shape[-1])):
-            for beam_id, sent in enumerate(beam_sent):
-                prefix_allowed_tokens = self._prefix_allowed_tokens_fn(batch_id, sent)
-                if len(prefix_allowed_tokens) == 0:
-                    raise ValueError(
-                        f"`prefix_allowed_tokens_fn` returned an empty list for batch ID {batch_id}."
-                        f"This means that the constraint is unsatisfiable. Please check your implementation"
-                        f"of `prefix_allowed_tokens_fn` "
-                    )
-                mask[batch_id * self._num_beams + beam_id, prefix_allowed_tokens] = 0
+        for batch_id, sent in enumerate(input_ids):
+            prefix_allowed_tokens = self._prefix_allowed_tokens_fn(batch_id, sent)
+            if len(prefix_allowed_tokens) == 0:
+                raise ValueError(
+                    f"`prefix_allowed_tokens_fn` returned an empty list for batch ID {batch_id}."
+                    f"This means that the constraint is unsatisfiable. Please check your implementation"
+                    f"of `prefix_allowed_tokens_fn` "
+                )
+            mask[batch_id, prefix_allowed_tokens] = 0
 
         scores_processed = scores + mask
         return scores_processed
