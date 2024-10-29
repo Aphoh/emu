@@ -50,6 +50,10 @@ class Emu3PrefixConstrainedLogitsHelper:
         height = self.height[batch_id] if self.height.shape[0] > 1 else self.height[0]
         width = self.width[batch_id] if self.width.shape[0] > 1 else self.width[0]
 
+        # strip padding
+        num_pad_tokens = torch.sum(input_ids == self.pad_token)
+        current_len = input_ids.shape[0] - num_pad_tokens
+        print(f"bid: {batch_id}, input_shape: {input_ids.shape}, n_pad: {num_pad_tokens}, current_len: {current_len}")
         offset = input_ids.shape[0] - self.offset_cache[batch_id]
         height = height.to(offset.device)
         width = width.to(offset.device)

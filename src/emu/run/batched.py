@@ -3,13 +3,15 @@ from typing import Optional, Tuple, List
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel, AutoImageProcessor
-from accelerate import init_empty_weights
+from accelerate import init_empty_weights, load_checkpoint_in_model
 from emu.mllm.configuration_emu3 import Emu3Config
 from ..mllm.modeling_emu3 import Emu3ForCausalLM
 from ..mllm.processor import PrefixConstrainedLogitsProcessor, ClassifierFreeGuidanceLogitsProcessor
 from huggingface_hub import snapshot_download 
 import safetensors.torch as safett
+import safetensors
 import glob
+import time
 from emu.mllm.processing_emu3 import Emu3Processor
 
 # model path
@@ -192,17 +194,22 @@ def main():
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
     
+    
     # Load state dict
     print("Loading state dict")
-    state_dict = {}
-    for filepath in glob.glob(f"{model_dl}/*.safetensors"):
-        state_dict.update(safett.load_file(filepath, device="cuda:0"))
+    start_t = time.time()
+    load_checkpoint_in_model(model, model_dl, device_map={"model": 0, "lm_head": 0}, dtype=torch.bfloat16)
+    #state_dict = {}
+    #for filepath in glob.glob(f"{model_dl}/*.safetensors"):
+    #    state_dict.update(safett.load_file(filepath, device="cuda:0"))
     
-    print("Loading state dict to model")
-    # Load model on single GPU
-    model.load_state_dict(state_dict, assign=True)
-    model = model.to(device)
+    #print("Loading state dict to model")
+    ## Load model on single GPU
+    #model.load_state_dict(state_dict, assign=True)
+    model = model.to(device, dtype=torch.bfloat16)
     model.eval()  # Set to evaluation mode
+    end_t = time.time()
+    print(f"State dict loaded in {end_t - start_t:.2f}s")
     
     print("Preparing")
     # Wrap model with accelerator for data parallelism
