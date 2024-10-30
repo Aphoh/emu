@@ -4,7 +4,7 @@ from typing import Optional
 from PIL import Image
 import torch
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModel, AutoImageProcessor, StaticCache
+from transformers import AutoTokenizer, AutoModel, AutoImageProcessor, StaticCache, DynamicCache
 from accelerate import init_empty_weights, load_checkpoint_in_model
 from emu.mllm.configuration_emu3 import Emu3Config
 from ..mllm.modeling_emu3 import Emu3ForCausalLM
@@ -90,9 +90,11 @@ def generate_step(
     prefix_proc=None,
     extras=None,
 ):
+    input_ids = next_tokens if next_tokens is not None else generated
     position_ids = torch.cumsum(attention_mask, dim=1) - 1
+    position_ids = position_ids[:, -input_ids.shape[1]:]
     outputs = model_fn(
-        input_ids=next_tokens if next_tokens else generated,
+        input_ids=input_ids,
         attention_mask=attention_mask,
         past_key_values=past_key_values,
         position_ids=position_ids,
@@ -147,15 +149,7 @@ def manual_generate(
     """
 
     # Track generated sequence
-    model.forward = torch.compile(model.forward, mode="reduce-overhead")
-    past_key_values = None
-    # past_key_values = StaticCache(
-    #    config=model.config,
-    #    batch_size=initial_input_ids.size(0),
-    #    max_cache_len=initial_input_ids.size(1) + 9000,
-    #    device=initial_input_ids.device,
-    #    dtype=model.dtype,
-    # )
+    past_key_values = DynamicCache()
     generated, generated_mask, past_key_values, extras = generate_step(
         model_fn=model,
         generated=initial_input_ids,
@@ -167,6 +161,8 @@ def manual_generate(
         top_p=top_p,
         top_k=top_k,
     )
+
+    #model.forward = torch.compile(model.forward, mode="reduce-overhead")
 
     if callback is not None:
         callback(0, 1, generated, generated[:, -1])
