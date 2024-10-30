@@ -51,9 +51,7 @@ class Emu3PrefixConstrainedLogitsHelper:
         width = self.width[batch_id] if self.width.shape[0] > 1 else self.width[0]
 
         # strip padding
-        num_pad_tokens = torch.sum(input_ids == self.pad_token)
-        current_len = input_ids.shape[0] - num_pad_tokens
-        offset = current_len - self.offset_cache[batch_id]
+        offset = input_ids.shape[0] - self.offset_cache[batch_id]
         height = height.to(offset.device)
         width = width.to(offset.device)
 
@@ -69,3 +67,11 @@ class Emu3PrefixConstrainedLogitsHelper:
             return (self.pad_token, )
         else:
             return self.visual_tokens
+
+
+
+def context_attn_bias(s: int, c: int) -> torch.Tensor:
+    base = torch.triu(torch.full((s, s), -torch.inf), diagonal=0)
+    base[:, c:] = -torch.inf
+    base.fill_diagonal_(0)
+    return base

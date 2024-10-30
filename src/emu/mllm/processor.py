@@ -1,6 +1,6 @@
 
 import math
-from typing import Callable, List
+from typing import Callable, List, Tuple
 import torch
 from transformers import LogitsProcessor
 
@@ -121,17 +121,10 @@ class ClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
                 f"{guidance_scale}."
             )
 
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        # simple check to make sure we have compatible batch sizes between our
-        # logits scores (cond + uncond) and input ids (cond only)
-        if scores.shape[0] != 2 * input_ids.shape[0]:
-            raise ValueError(
-                f"Logits should have twice the batch size of the input ids, the first half of batches corresponding to "
-                f"the conditional inputs, and the second half of batches corresponding to the unconditional inputs. Got "
-                f"batch size {scores.shape[0]} for the logits and {input_ids.shape[0]} for the input ids."
-            )
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> Tuple[torch.FloatTensor, int]:
+        assert scores.shape[0] == input_ids.shape[0], f"input_ids {input_ids.shape} and scores {scores.shape} should have the same batch size."
         unguided_bsz = scores.shape[0] // 2
         cond_logits, uncond_logits = scores.split(unguided_bsz, dim=0)
         scores_processed = uncond_logits + (cond_logits - uncond_logits) * self.guidance_scale
-        return scores_processed
+        return scores_processed, 2
 

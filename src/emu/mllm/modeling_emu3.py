@@ -238,6 +238,9 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
+@torch.compile
+def fused_mlp(x, gate, up, down, act_fn):
+    return down(up(x) * act_fn(gate(x)))
 
 class Emu3MLP(nn.Module):
     def __init__(self, config):
@@ -268,7 +271,7 @@ class Emu3MLP(nn.Module):
             ]
             down_proj = sum(down_proj)
         else:
-            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+            down_proj = fused_mlp(x, self.gate_proj, self.up_proj, self.down_proj, self.act_fn)
 
         return down_proj
 
@@ -470,6 +473,7 @@ class Emu3FlashAttention2(Emu3Attention):
         # flash_attn<2.1 generates top-left aligned causal mask, while what is needed here is bottom-right alignement, that was made default for flash_attn>=2.1. This attribute is used to handle this difference. Reference: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.1.0.
         # Beware that with flash_attn<2.1, using q_seqlen != k_seqlen (except for the case q_seqlen == 1) produces a wrong mask (top-left).
         self._flash_attn_uses_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
+        print("Using flash attention")
 
     def forward(
         self,
@@ -546,6 +550,8 @@ class Emu3FlashAttention2(Emu3Attention):
             query_states = query_states.to(target_dtype)
             key_states = key_states.to(target_dtype)
             value_states = value_states.to(target_dtype)
+
+        flash_attn_varlen_func        
 
         attn_output = self._flash_attention_forward(
             query_states, key_states, value_states, attention_mask, q_len, dropout=dropout_rate
@@ -639,7 +645,7 @@ class Emu3FlashAttention2(Emu3Attention):
             max_seqlen_in_batch_q = 1
             cu_seqlens_q = torch.arange(
                 batch_size + 1, dtype=torch.int32, device=query_layer.device
-            )  # There is a memcpy here, that is very bad.
+            )
             indices_q = cu_seqlens_q[:-1]
             query_layer = query_layer.squeeze(1)
         else:

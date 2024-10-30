@@ -4,6 +4,7 @@ from PIL import Image
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel, AutoImageProcessor
+from torch.profiler import profile, record_function, ProfilerActivity
 from accelerate import init_empty_weights, load_checkpoint_in_model
 from emu.mllm.configuration_emu3 import Emu3Config
 from ..mllm.modeling_emu3 import Emu3ForCausalLM
@@ -15,31 +16,11 @@ from huggingface_hub import snapshot_download
 import time
 from tqdm import tqdm
 from emu.mllm.processing_emu3 import Emu3Processor
+import wandb
 
 # model path
 EMU_HUB = "BAAI/Emu3-Gen"
 VQ_HUB = "BAAI/Emu3-VisionTokenizer"
-
-
-def pad_to_length(
-    tensor: torch.Tensor, target_length: int, pad_value: int
-) -> torch.Tensor:
-    """Pad tensor to target length along dimension 1"""
-    pad_length = target_length - tensor.size(1)
-    if pad_length <= 0:
-        return tensor
-    padding = torch.full(
-        (tensor.size(0), pad_length),
-        pad_value,
-        dtype=tensor.dtype,
-        device=tensor.device,
-    )
-    return torch.cat([tensor, padding], dim=1)
-
-
-def create_attention_mask(input_ids: torch.Tensor, pad_token_id: int) -> torch.Tensor:
-    """Create attention mask for padded sequence"""
-    return (input_ids != pad_token_id).long()
 
 
 def sample_from_logits(logits, temperature=1.0, top_p=0.9):
@@ -72,10 +53,11 @@ def sample_from_logits(logits, temperature=1.0, top_p=0.9):
 
 def manual_generate(
     model,
-    initial_input_ids,
+    initial_input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
     tokenizer,
-    prefix_proc,
-    cfg_proc,
+    prefix_proc: PrefixConstrainedLogitsProcessor,
+    cfg_proc: ClassifierFreeGuidanceLogitsProcessor,
     temperature=1.0,
     top_p=0.9,
     callback=None,
@@ -86,13 +68,8 @@ def manual_generate(
     """
     device = initial_input_ids.device
 
-    # Pad sequences to same length
-    input_length = initial_input_ids.size(1)
-    input_ids = pad_to_length(initial_input_ids, input_length, tokenizer.pad_token_id)
-    attention_mask = create_attention_mask(input_ids, tokenizer.pad_token_id)
-
     # Track generated sequence
-    generated = input_ids.clone()
+    generated = initial_input_ids.clone()
     generated_mask = attention_mask.clone()
 
     # First forward pass with full input sequence
@@ -108,13 +85,16 @@ def manual_generate(
     past_key_values = outputs.past_key_values
 
     # Process initial logits
-    # if cfg_proc is not None:
-    #    logits = cfg_proc(generated[:batch_size], logits)  # Pass positive samples for CFG
+    if cfg_proc is not None:
+        logits, expand_factor = cfg_proc(generated, logits)  # Pass positive samples for CFG
     if prefix_proc is not None:
         logits = prefix_proc(generated, logits)
 
     # Sample first new token
     next_tokens = sample_from_logits(logits, temperature, top_p)
+    if expand_factor > 1:
+        assert next_tokens.ndim == 2, f"Expected 2D next_tokens tensor, got {next_tokens.ndim}"
+        next_tokens = next_tokens.repeat(expand_factor, 1)
     generated = torch.cat([generated, next_tokens], dim=1)
     # Extend attention mask for new token
     attention_mask_extension = torch.ones((generated.size(0), 1), device=device)
@@ -122,7 +102,7 @@ def manual_generate(
 
     # Optional callback
     if callback is not None:
-        callback(0, generated, next_tokens, logits)
+        callback(0, 1, generated, next_tokens, logits)
 
     # Generation loop using past_key_values
     @torch.compile
@@ -140,8 +120,19 @@ def manual_generate(
     i = 0
     pbar = tqdm()
     while True:
+        step_start_t = time.time()
         pbar.update(1)
         # Forward pass with only the new token and past_key_values
+        if i > 5:
+            with profile(
+                activities=[ProfilerActivity.CUDA], record_shapes=True
+            ) as prof:
+                with record_function("model_inference"):
+                    outputs = next_logits_fn(
+                        model, generated, generated_mask, past_key_values
+                    )
+            prof.export_chrome_trace("trace.json")
+            return
         outputs = next_logits_fn(model, next_tokens, generated_mask, past_key_values)
         logits = outputs.logits[:, -1, :]
         past_key_values = outputs.past_key_values
@@ -161,7 +152,14 @@ def manual_generate(
         # Optional callback
         if callback is not None:
             pbar.set_description_str(
-                callback(i, generated, next_tokens, logits, past_key_values)
+                callback(
+                    i,
+                    time.time() - step_start_t,
+                    generated,
+                    next_tokens,
+                    logits,
+                    past_key_values,
+                )
             )
 
         # Check if we've hit the EOS token for all sequences
@@ -177,40 +175,45 @@ def manual_generate(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Image generation")
-    parser.add_argument("--input", type=str, default="a shiba inu", help="input text")
+    parser.add_argument("-p", "--prompt", type=str, default="a shiba inu", help="input text")
     parser.add_argument(
         "--num_images", type=int, default=1, help="number of images to generate"
     )
-    parser.add_argument(
-        "--output_file",
-        type=str,
-        default="generated_tokens.pt",
-        help="output file for tokens",
-    )
-    parser.add_argument(
-        "--temperature", type=float, default=1.0, help="sampling temperature"
-    )
-    parser.add_argument(
-        "--top_p", type=float, default=0.9, help="nucleus sampling threshold"
-    )
+    parser.add_argument("--cfg_scale", type=float, default=3.0, help="CFG scale")
+    parser.add_argument("--temp", type=float, default=1.0, help="temperature")
+    parser.add_argument("--topp", type=float, default=0.9, help="temperature")
+    parser.add_argument("-m", "--method", type=str, default="nocfg", choices=["nocfg", "cfg", "jjeoni"])
     return parser.parse_args()
 
 
-def generation_callback(step, generated, next_tokens, logits, past_key_values=None):
+def generation_callback(
+    step, step_time, generated, next_tokens, logits, past_key_values=None
+):
     """
     Example callback function with access to past_key_values
     """
-    return f"Step {step}: curr_len: {generated.size(1)}, next_tokens: {next_tokens.tolist()}"
+    num_tokens = next_tokens.numel()
+    tps = num_tokens / step_time
+    wandb.log({"tps": tps})
+    return f"Step {step}: curr_len: {generated.size(1)}, tps: {tps:.2f}"
 
 
 def main():
     args = parse_args()
-    input_text: Optional[str] = args.input
+
+    wandb.init(project="cfg-stuff", config=dict(args))
+    prompt: str = args.prompt
     num_images: int = args.num_images
+    cfg_scale: float = args.cfg_scale
+    temperature: float = args.temp
+    top_p: float = args.topp
+    method: str = args.method
+
 
     # Model initialization with data parallelism
     model_dl = snapshot_download(EMU_HUB)
     config = Emu3Config.from_json_file(f"{model_dl}/config.json")
+    config._attn_implementation = "sdpa"
 
     # Initialize model
     with init_empty_weights():
@@ -244,9 +247,8 @@ def main():
     processor = Emu3Processor(image_processor, image_tokenizer, tokenizer)
 
     # Prepare input
-    pos_prompt = input_text
+    pos_prompt = prompt
     neg_prompt = ""
-    classifier_free_guidance = 3.0
 
     text_inputs = ([pos_prompt] * num_images) + ([neg_prompt] * num_images)
     inputs = processor(
@@ -262,31 +264,34 @@ def main():
     w = inputs.image_size[:, 1]
     constrained_fn = processor.build_prefix_constrained_fn(h, w)
     prefix_proc = PrefixConstrainedLogitsProcessor(constrained_fn)
-    cfg_proc = ClassifierFreeGuidanceLogitsProcessor(classifier_free_guidance)
+    cfg_proc = ClassifierFreeGuidanceLogitsProcessor(cfg_scale)
 
     # Manual generation
     with torch.inference_mode():
         generated_tokens = manual_generate(
             model=model,
             initial_input_ids=inputs.input_ids.to(device),
+            attention_mask=inputs.attention_mask.to(device),
             tokenizer=tokenizer,
             prefix_proc=prefix_proc,
             cfg_proc=cfg_proc,
-            temperature=args.temperature,
-            top_p=args.top_p,
+            temperature=temperature,
+            top_p=top_p,
             callback=generation_callback,
         )
 
+    columns = ["type", "image", "text"]
+    rows = []
     for i, tokens in enumerate(generated_tokens):
         mm_list = processor.decode(tokens)
         for idx_j, im in enumerate(mm_list):
             if not isinstance(im, Image.Image):
                 continue
-            print(f"Saving generated image {i}_{idx_j}")
-            im.save(f"generated_{i}_{idx_j}.png")
+            img_type = "pos" if  i < num_images else "neg"
+            rows.append([img_type, wandb.Image(im), text_inputs[i]])
 
-    return generated_tokens
-
+    wandb.log({"images": wandb.Table(data=rows, columns=columns)})
+    
 
 if __name__ == "__main__":
     main()
