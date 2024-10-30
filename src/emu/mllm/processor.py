@@ -112,19 +112,13 @@ class ClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
     ```
     """
 
-    def __init__(self, guidance_scale):
-        if guidance_scale > 1:
-            self.guidance_scale = guidance_scale
-        else:
-            raise ValueError(
-                "Require guidance scale >1 to use the classifier free guidance processor, got guidance scale "
-                f"{guidance_scale}."
-            )
+    def __init__(self, guidance_scale, pag_scale):
+        self.cfg_scale = guidance_scale
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> Tuple[torch.FloatTensor, int]:
         assert scores.shape[0] == input_ids.shape[0], f"input_ids {input_ids.shape} and scores {scores.shape} should have the same batch size."
         unguided_bsz = scores.shape[0] // 2
         cond_logits, uncond_logits = scores.split(unguided_bsz, dim=0)
-        scores_processed = uncond_logits + (cond_logits - uncond_logits) * self.guidance_scale
+        scores_processed = uncond_logits + (cond_logits - uncond_logits) * self.cfg_scale 
         return scores_processed, 2
 

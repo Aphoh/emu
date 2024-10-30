@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "accelerate>=1",
-    "transformers==4.44",
+    "transformers==4.46",
     "tiktoken==0.6.0",
     "pillow",
     "gradio==4.44.0",
