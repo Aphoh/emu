@@ -124,10 +124,9 @@ def generate_step(
     new_mask = torch.cat([attention_mask, attention_mask_extension], dim=1)
     if extras is None:
         extras = defaultdict(list)
-    if extras:
-        topk_logits = logits.topk(100, dim=-1)
-        extras["logit_hist_vals"].append(topk_logits.values)
-        extras["logit_hist_inds"].append(topk_logits.indices)
+    topk_logits = logits.topk(100, dim=-1)
+    extras["logit_hist_vals"].append(topk_logits.values)
+    extras["logit_hist_inds"].append(topk_logits.indices)
     return new_generated, new_mask, past_key_values, extras
 
 
@@ -169,7 +168,7 @@ def manual_generate(
 
     start_t = time.time()
     i = 0
-    pbar = tqdm()
+    pbar = tqdm(total=8191)
     while True:
         step_start_t = time.time()
         pbar.update(1)
@@ -288,9 +287,14 @@ def main():
     pos_prompt = prompt
     neg_prompt = ""
 
-    text_inputs = ([pos_prompt] * num_images) + ([neg_prompt] * num_images)
+    is_cfg = cfg_scale > 1
+    is_pag = pag_scale > 0
+
+    num_pos = num_images if not is_pag else 2 * num_images # 2x for PAG
+    num_neg = 0 if not is_cfg else num_images 
+    text_inputs = ([pos_prompt] * num_pos) + ([neg_prompt] * num_neg)
     inputs = processor(
-        text=([pos_prompt] * num_images) + ([neg_prompt] * num_images),
+        text=text_inputs,
         mode="G",
         ratio=["1:1"] * len(text_inputs),
         image_area=config.image_area,
@@ -319,15 +323,14 @@ def main():
             callback=generation_callback,
         )
 
-    columns = ["type", "image", "text"]
+    columns = ["cfg", "pag", "image", "text"]
     rows = []
-    for i, tokens in enumerate(generated_tokens):
+    for i, tokens in enumerate(generated_tokens[:num_images]):
         mm_list = processor.decode(tokens)
         for idx_j, im in enumerate(mm_list):
             if not isinstance(im, Image.Image):
                 continue
-            img_type = "pos" if i < num_images else "neg"
-            rows.append([img_type, wandb.Image(im), text_inputs[i]])
+            rows.append([cfg_scale, pag_scale, wandb.Image(im), text_inputs[i]])
 
     wandb.log({"images": wandb.Table(data=rows, columns=columns)})
     # Log extras and generated_tokens to wandb
@@ -335,7 +338,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     torch.save(extras, out_dir / "extras.pt")
     torch.save(generated_tokens, out_dir / "generated_tokens.pt")
-    wandb.save(out_dir, policy="now")
+    wandb.save(str(out_dir) + "/*", policy="now")
 
 
 if __name__ == "__main__":
