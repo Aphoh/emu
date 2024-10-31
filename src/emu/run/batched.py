@@ -217,7 +217,7 @@ def parse_args():
     )
     parser.add_argument("--cfg_scale", type=float, default=0.0, help="CFG scale")
     parser.add_argument("--pag_scale", type=float, default=0.0, help="PAG scale")
-    parser.add_argument("--pag_pos", action="store_true", help="PAG use pos")
+    parser.add_argument("--pag_no_pos", action="store_true", help="PAG don't use pos")
     parser.add_argument("--temp", type=float, default=1.0, help="temperature")
     parser.add_argument("--top_p", type=float, help="top p")
     parser.add_argument("--top_k", type=float, default=2048, help="top k")
@@ -240,11 +240,13 @@ def main():
     wandb.init(project="cfg-stuff", config=vars(args))
     prompt: str = args.prompt
     num_images: int = args.num_images
+    pag_pos: bool = not args.pag_no_pos
     cfg_scale: float = args.cfg_scale
     pag_scale: float = args.pag_scale
     temperature: float = args.temp
     top_p: float = args.top_p
     top_k: int = args.top_k
+    del args
 
     # Model initialization with data parallelism
     model_dl = snapshot_download(EMU_HUB)
@@ -306,7 +308,7 @@ def main():
     constrained_fn = processor.build_prefix_constrained_fn(h, w)
     prefix_proc = PrefixConstrainedLogitsProcessor(constrained_fn)
     cfg_proc = ClassifierFreeGuidanceLogitsProcessor(cfg_scale, pag_scale)
-    mask_pos_generator = MaskPosGenerator(inputs.attention_mask.to(device), is_cfg, is_pag)
+    mask_pos_generator = MaskPosGenerator(inputs.attention_mask.to(device), is_cfg, is_pag, pag_with_position=pag_pos)
 
     # Manual generation
     with torch.inference_mode():
