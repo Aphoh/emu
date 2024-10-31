@@ -1,10 +1,11 @@
 import argparse
 from collections import defaultdict
+import os
 from typing import Optional
 from PIL import Image
 import torch
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModel, AutoImageProcessor, StaticCache, DynamicCache
+from transformers import AutoTokenizer, AutoModel, AutoImageProcessor, DynamicCache
 from accelerate import init_empty_weights, load_checkpoint_in_model
 from emu.mllm.configuration_emu3 import Emu3Config
 from emu.run.utils import MaskPosGenerator
@@ -165,7 +166,7 @@ def manual_generate(
 
     start_t = time.time()
     i = 0
-    pbar = tqdm(total=8191)
+    pbar = tqdm(total=8191, disable=bool(os.environ.get("TQDM_DISABLE", False)))
     while True:
         step_start_t = time.time()
         pbar.update(1)
@@ -216,7 +217,7 @@ def parse_args():
     )
     parser.add_argument("--cfg_scale", type=float, default=0.0, help="CFG scale")
     parser.add_argument("--pag_scale", type=float, default=0.0, help="PAG scale")
-    parser.add_argument("--pag_pos", type=bool, action="store_true", help="PAG use pos")
+    parser.add_argument("--pag_pos", action="store_true", help="PAG use pos")
     parser.add_argument("--temp", type=float, default=1.0, help="temperature")
     parser.add_argument("--top_p", type=float, help="top p")
     parser.add_argument("--top_k", type=float, default=2048, help="top k")
@@ -312,7 +313,7 @@ def main():
         generated_tokens, extras = manual_generate(
             model=model,
             initial_input_ids=inputs.input_ids.to(device),
-            mask_pos_gen=mask_pos_generator,
+            mask_pos_generator=mask_pos_generator,
             tokenizer=tokenizer,
             prefix_proc=prefix_proc,
             cfg_proc=cfg_proc,
