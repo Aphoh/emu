@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel, AutoImageProcessor, StaticCache, DynamicCache
 from accelerate import init_empty_weights, load_checkpoint_in_model
 from emu.mllm.configuration_emu3 import Emu3Config
+from emu.run.utils import MaskPosGenerator
 from ..mllm.modeling_emu3 import Emu3ForCausalLM
 from ..mllm.processor import (
     PrefixConstrainedLogitsProcessor,
@@ -80,7 +81,7 @@ def generate_step(
     *,
     model_fn,
     generated,
-    attention_mask,
+    mask_pos_generator: MaskPosGenerator,
     temperature,
     top_p,
     top_k,
@@ -91,7 +92,7 @@ def generate_step(
     extras=None,
 ):
     input_ids = next_tokens if next_tokens is not None else generated
-    position_ids = torch.cumsum(attention_mask, dim=1) - 1
+    attention_mask, position_ids = mask_pos_generator(generated)
     position_ids = position_ids[:, -input_ids.shape[1]:]
     outputs = model_fn(
         input_ids=input_ids,
@@ -118,22 +119,18 @@ def generate_step(
         next_tokens = next_tokens.repeat(expand_factor)
     new_generated = torch.cat([generated, next_tokens.unsqueeze(1)], dim=1)
     # Extend attention mask for new token
-    attention_mask_extension = torch.ones(
-        (generated.size(0), 1), device=generated.device
-    )
-    new_mask = torch.cat([attention_mask, attention_mask_extension], dim=1)
     if extras is None:
         extras = defaultdict(list)
     topk_logits = logits.topk(100, dim=-1)
     extras["logit_hist_vals"].append(topk_logits.values)
     extras["logit_hist_inds"].append(topk_logits.indices)
-    return new_generated, new_mask, past_key_values, extras
+    return new_generated, past_key_values, extras
 
 
 def manual_generate(
     model,
     initial_input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
+    mask_pos_generator: MaskPosGenerator,
     tokenizer,
     prefix_proc: PrefixConstrainedLogitsProcessor,
     cfg_proc: ClassifierFreeGuidanceLogitsProcessor,
@@ -149,10 +146,10 @@ def manual_generate(
 
     # Track generated sequence
     past_key_values = DynamicCache()
-    generated, generated_mask, past_key_values, extras = generate_step(
+    generated, past_key_values, extras = generate_step(
         model_fn=model,
         generated=initial_input_ids,
-        attention_mask=attention_mask,
+        mask_pos_generator=mask_pos_generator,
         cfg_proc=cfg_proc,
         prefix_proc=prefix_proc,
         past_key_values=past_key_values,
@@ -173,11 +170,11 @@ def manual_generate(
         step_start_t = time.time()
         pbar.update(1)
         # Forward pass with only the new token and past_key_values
-        generated, generated_mask, past_key_values, extras = generate_step(
+        generated, past_key_values, extras = generate_step(
             model_fn=model,
             generated=generated,
             next_tokens=generated[:, -1].unsqueeze(-1),
-            attention_mask=generated_mask,
+            mask_pos_generator=mask_pos_generator,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
@@ -217,11 +214,12 @@ def parse_args():
     parser.add_argument(
         "--num_images", type=int, default=1, help="number of images to generate"
     )
-    parser.add_argument("--cfg_scale", type=float, default=3.0, help="CFG scale")
-    parser.add_argument("--pag_scale", type=float, default=0.0, help="CFG scale")
+    parser.add_argument("--cfg_scale", type=float, default=0.0, help="CFG scale")
+    parser.add_argument("--pag_scale", type=float, default=0.0, help="PAG scale")
+    parser.add_argument("--pag_pos", type=bool, action="store_true", help="PAG use pos")
     parser.add_argument("--temp", type=float, default=1.0, help="temperature")
-    parser.add_argument("--top_p", type=float, help="temperature")
-    parser.add_argument("--top_k", type=float, default=2048, help="temperature")
+    parser.add_argument("--top_p", type=float, help="top p")
+    parser.add_argument("--top_k", type=float, default=2048, help="top k")
     return parser.parse_args()
 
 
@@ -287,7 +285,7 @@ def main():
     pos_prompt = prompt
     neg_prompt = ""
 
-    is_cfg = cfg_scale > 1
+    is_cfg = cfg_scale > 0
     is_pag = pag_scale > 0
 
     num_pos = num_images if not is_pag else 2 * num_images # 2x for PAG
@@ -307,13 +305,14 @@ def main():
     constrained_fn = processor.build_prefix_constrained_fn(h, w)
     prefix_proc = PrefixConstrainedLogitsProcessor(constrained_fn)
     cfg_proc = ClassifierFreeGuidanceLogitsProcessor(cfg_scale, pag_scale)
+    mask_pos_generator = MaskPosGenerator(inputs.attention_mask.to(device), is_cfg, is_pag)
 
     # Manual generation
     with torch.inference_mode():
         generated_tokens, extras = manual_generate(
             model=model,
             initial_input_ids=inputs.input_ids.to(device),
-            attention_mask=inputs.attention_mask.to(device),
+            mask_pos_gen=mask_pos_generator,
             tokenizer=tokenizer,
             prefix_proc=prefix_proc,
             cfg_proc=cfg_proc,
@@ -338,7 +337,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     torch.save(extras, out_dir / "extras.pt")
     torch.save(generated_tokens, out_dir / "generated_tokens.pt")
-    wandb.save(str(out_dir) + "/*", policy="now")
+    wandb.save(str(out_dir) + "/*", policy="end")
 
 
 if __name__ == "__main__":

@@ -112,28 +112,30 @@ class ClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
     ```
     """
 
-    def __init__(self, guidance_scale, pag_scale):
-        self.cfg_scale = guidance_scale
+    def __init__(self, cfg_scale, pag_scale):
+        assert cfg_scale >= 0, f"`cfg_scale` should be greater than or equal to 0, but got {cfg_scale}."
+        assert pag_scale >= 0, f"`pag_scale` should be greater than or equal to 0, but got {pag_scale}."
+        self.cfg_scale = cfg_scale
         self.pag_scale = pag_scale
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> Tuple[torch.FloatTensor, int]:
         assert scores.shape[0] == input_ids.shape[0], f"input_ids {input_ids.shape} and scores {scores.shape} should have the same batch size."
 
-        if self.cfg_scale > 1 and self.pag_scale > 0:
+        if self.cfg_scale > 0 and self.pag_scale > 0:
             unguided_bsz = scores.shape[0] // 3
             cond_logits, pag_logits, uncond_logits = scores.split(unguided_bsz, dim=0)
             scores_processed = uncond_logits + (cond_logits - uncond_logits) * self.cfg_scale + (pag_logits - cond_logits) * self.pag_scale
             return scores_processed, 3
-        elif self.cfg_scale > 1 and self.pag_scale == 0:
+        elif self.cfg_scale > 0 and self.pag_scale == 0:
             unguided_bsz = scores.shape[0] // 2
             cond_logits, uncond_logits = scores.split(unguided_bsz, dim=0)
-            scores_processed = uncond_logits + (cond_logits - uncond_logits) * self.cfg_scale
+            scores_processed = cond_logits + (cond_logits - uncond_logits) * self.cfg_scale
             return scores_processed, 2
-        elif self.cfg_scale == 1 and self.pag_scale > 0:
+        elif self.cfg_scale == 0 and self.pag_scale > 0:
             unguided_bsz = scores.shape[0] // 2
-            pag_logits, uncond_logits = scores.split(unguided_bsz, dim=0)
-            scores_processed = uncond_logits + (pag_logits - uncond_logits) * self.pag_scale
-            return scores_processed
+            cond_logits, pag_logits = scores.split(unguided_bsz, dim=0)
+            scores_processed = cond_logits + (pag_logits - cond_logits) * self.pag_scale
+            return scores_processed, 2
         else:
             return scores_processed, 1
 
