@@ -95,7 +95,7 @@ def generate_step(
 ):
     input_ids = next_tokens if next_tokens is not None else generated
     attention_mask, position_ids = mask_pos_generator(generated)
-    cache_position = position_ids.clone()
+    cache_position = torch.arange(attention_mask.shape[1], device=input_ids.device)[-input_ids.shape[1]:]
     position_ids = position_ids[:, -input_ids.shape[1]:]
     if isinstance(past_key_values, StaticCache):
         kv_size = past_key_values.max_cache_len
@@ -191,7 +191,7 @@ def manual_generate(
         step_start_t = time.time()
         pbar.update(1)
         # Forward pass with only the new token and past_key_values
-        with sdpa_kernel([SDPBackend.MATH, SDPBackend.FLASH_ATTENTION]): # Actually better for Inductor to codegen attention here
+        with sdpa_kernel([SDPBackend.CUDNN_ATTENTION]): # Actually better for Inductor to codegen attention here
             generated, past_key_values, extras = generate_step(
                 model_fn=model,
                 generated=generated,
