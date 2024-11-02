@@ -1,3 +1,4 @@
+import math
 import torch
 import triton
 
@@ -8,9 +9,10 @@ from .utils import is_hip
 class _attention(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v, mask=None, sm_scale=1.3):
+    def forward(ctx, q, k, v, mask=None, sm_scale=None):
         # shape constraints
         HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
+        sm_scale = sm_scale or 1.0 / math.sqrt(HEAD_DIM_Q)
         USE_MASK = mask is not None
         # when v is in float8_e5m2 it is transposed.
         HEAD_DIM_V = v.shape[-1]
