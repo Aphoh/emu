@@ -601,17 +601,14 @@ class LlamaSdpaAttention(LlamaAttention):
         # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
         is_causal = True if causal_mask is None and q_len > 1 else False
 
-        print("mask shape", causal_mask.shape, "query_states shape", query_states.shape, "key_states shape", key_states.shape, "value_states shape", value_states.shape)
-        #attn_output = flash_attention_custom_mask(query_states, key_states, value_states, causal_mask)
-        attn_output = flash_attn_func(query_states, key_states, value_states, causal_mask, True)
-        #attn_output = torch.nn.functional.scaled_dot_product_attention(
-        #    query_states,
-        #    key_states,
-        #    value_states,
-        #    attn_mask=causal_mask,
-        #    dropout_p=self.attention_dropout if self.training else 0.0,
-        #    is_causal=is_causal,
-        #)
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query_states,
+            key_states,
+            value_states,
+            attn_mask=causal_mask,
+            dropout_p=self.attention_dropout if self.training else 0.0,
+            is_causal=is_causal,
+        )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, -1)

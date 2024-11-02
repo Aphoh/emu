@@ -5,10 +5,11 @@ from typing import Optional
 from PIL import Image
 import torch
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModel, AutoImageProcessor, LlamaConfig, StaticCache
+from transformers import AutoTokenizer, AutoModel, AutoImageProcessor, LlamaConfig, StaticCache, DynamicCache
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from accelerate import init_empty_weights, load_checkpoint_in_model
 from emu.mllm.configuration_emu3 import Emu3Config
+from emu.mllm.kvcache import ChunkedDynamicCache
 from emu.run.utils import MaskPosGenerator
 from ..mllm.modeling_llama import LlamaForCausalLM
 from ..mllm.processor import (
@@ -97,12 +98,20 @@ def generate_step(
     attention_mask, position_ids = mask_pos_generator(generated)
     cache_position = torch.arange(attention_mask.shape[1], device=input_ids.device)[-input_ids.shape[1]:]
     position_ids = position_ids[:, -input_ids.shape[1]:]
-    if isinstance(past_key_values, StaticCache):
-        kv_size = past_key_values.max_cache_len
+    if isinstance(past_key_values, ChunkedDynamicCache):
+        kv_size = past_key_values.current_size()
         # Pad mask to mask the kv len
         b, s = attention_mask.shape
         to_add = torch.zeros((b, kv_size - s), device=attention_mask.device, dtype=attention_mask.dtype)
         attention_mask = torch.cat([attention_mask, to_add], dim=1)
+
+
+    #if isinstance(past_key_values, StaticCache):
+    #    kv_size = past_key_values.max_cache_len
+    #    # Pad mask to mask the kv len
+    #    b, s = attention_mask.shape
+    #    to_add = torch.zeros((b, kv_size - s), device=attention_mask.device, dtype=attention_mask.dtype)
+    #    attention_mask = torch.cat([attention_mask, to_add], dim=1)
 
     outputs = model_fn(
         input_ids=input_ids,
@@ -160,13 +169,14 @@ def manual_generate(
     # make sure the cache is a multiple of 128
     kv_cache_len = (kv_cache_len // 128 + 1) * 128
     # Track generated sequence
-    past_key_values = StaticCache(
-        batch_size=initial_input_ids.shape[0],
-        max_cache_len=kv_cache_len,
-        device=initial_input_ids.device,
-        dtype=torch.bfloat16,
-        config=config
-    )
+    #past_key_values = StaticCache(
+    #    batch_size=initial_input_ids.shape[0],
+    #    max_cache_len=kv_cache_len,
+    #    device=initial_input_ids.device,
+    #    dtype=torch.bfloat16,
+    #    config=config
+    #)
+    past_key_values = ChunkedDynamicCache()
     generated, past_key_values, extras = generate_step(
         model_fn=model,
         generated=initial_input_ids,
