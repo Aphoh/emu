@@ -1,7 +1,7 @@
 import triton
 import triton.language as tl
 
-from fa2_custom_mask.utils import is_hip, keep
+from .utils import is_hip, keep
 
 # We don't run auto-tuning every time to keep the tutorial fast. Keeping
 # the code below and commenting out the equivalent parameters is convenient for
@@ -66,7 +66,7 @@ def _attn_fwd_inner(
             # mask = offs_m[:, None] >= (start_n + offs_n[None, :])
             # TODO: replace mask!
             mask_ = tl.load(mask_block_ptr)
-            qk = qk * qk_scale + tl.where(mask_, 0, -1.0e6)
+            qk = qk * qk_scale + mask_
             m_ij = tl.maximum(m_i, tl.max(qk, 1))
             qk -= m_ij[:, None]
         else:
@@ -84,7 +84,7 @@ def _attn_fwd_inner(
         if fp8_v:
             p = p.to(tl.float8e5)
         else:
-            p = p.to(tl.float16)
+            p = p.to(tl.bfloat16)
         acc = tl.dot(p, v, acc)
         # update m_i and l_i
         m_i = m_ij

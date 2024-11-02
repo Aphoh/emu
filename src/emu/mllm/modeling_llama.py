@@ -50,7 +50,7 @@ from transformers.utils import (
 )
 from transformers import LlamaConfig
 
-from ..fa2_mask import fa2_custom_mask
+from ..fa2_mask.fa2_custom_mask import flash_attention_custom_mask
 
 
 logger = logging.get_logger(__name__)
@@ -601,7 +601,8 @@ class LlamaSdpaAttention(LlamaAttention):
         # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
         is_causal = True if causal_mask is None and q_len > 1 else False
 
-        attn_output = fa2_custom_mask(query_states, key_states, value_states, mask=causal_mask)
+        print("mask shape", causal_mask.shape)
+        attn_output = flash_attention_custom_mask(query_states, key_states, value_states, causal_mask)
         #attn_output = torch.nn.functional.scaled_dot_product_attention(
         #    query_states,
         #    key_states,

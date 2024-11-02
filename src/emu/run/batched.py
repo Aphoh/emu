@@ -179,7 +179,9 @@ def manual_generate(
         top_k=top_k,
     )
 
-    model.forward = torch.compile(model.forward, mode="reduce-overhead", fullgraph=True)
+    # Bug in torch dynamo with scaled_dot_product_attention
+    torch._dynamo.disallow_in_graph(torch.nn.functional.scaled_dot_product_attention)
+    model.forward = torch.compile(model.forward, mode="reduce-overhead")
 
     if callback is not None:
         callback(0, 1, generated, generated[:, -1])
@@ -191,7 +193,7 @@ def manual_generate(
         step_start_t = time.time()
         pbar.update(1)
         # Forward pass with only the new token and past_key_values
-        with sdpa_kernel([SDPBackend.CUDNN_ATTENTION]): # Actually better for Inductor to codegen attention here
+        with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]): # Actually better for Inductor to codegen attention here
             generated, past_key_values, extras = generate_step(
                 model_fn=model,
                 generated=generated,

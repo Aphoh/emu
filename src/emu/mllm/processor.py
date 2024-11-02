@@ -137,5 +137,5 @@ class ClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
             scores_processed = cond_logits + (pag_logits - cond_logits) * self.pag_scale
             return scores_processed, 2
         else:
-            return scores_processed, 1
+            return scores, 1
 
