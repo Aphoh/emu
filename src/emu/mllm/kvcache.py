@@ -1,7 +1,8 @@
 import torch
 from typing import List, Tuple, Dict, Any, Optional
+from transformers.cache_utils import Cache
 
-class ChunkedDynamicCache:
+class ChunkedDynamicCache(Cache):
     """
     A cache that grows dynamically in chunks of 128 tokens as more tokens are generated.
     The cache stores Key and Value states as lists of tensors, one for each layer.
@@ -18,11 +19,11 @@ class ChunkedDynamicCache:
         """Returns the number of layers in the cache."""
         return len(self.key_cache)
         
-    def current_size(self) -> int:
-        """Returns the current allocated size of the cache in tokens."""
-        if not self.key_cache or not isinstance(self.key_cache[0], torch.Tensor):
+    def get_seq_length(self, layer_idx = 0):
+        if len(self.key_cache) > layer_idx:
+            return self._seen_tokens if layer_idx == 0 else self.key_cache[layer_idx].shape[-2]
+        else:
             return 0
-        return self.key_cache[0].shape[-2]
         
     def update(
         self,
@@ -53,17 +54,35 @@ class ChunkedDynamicCache:
             self.value_cache.append([])
             
         if len(self.key_cache[layer_idx]) == 0:
-            # First insertion for this layer
-            self.key_cache[layer_idx] = key_states
-            self.value_cache[layer_idx] = value_states
+            # First insertion for this layer - need to pad to chunk size
+            initial_length = key_states.shape[-2]
+            needed_size = ((initial_length - 1) // self.chunk_size + 1) * self.chunk_size
+            
+            # Create padded tensors
+            padded_shape = list(key_states.shape)
+            padded_shape[-2] = needed_size
+            
+            new_key_cache = torch.zeros(padded_shape, dtype=key_states.dtype, device=key_states.device)
+            new_value_cache = torch.zeros(padded_shape, dtype=value_states.dtype, device=value_states.device)
+            
+            # Copy initial states
+            new_key_cache[..., :initial_length, :] = key_states
+            new_value_cache[..., :initial_length, :] = value_states
+            
+            self.key_cache[layer_idx] = new_key_cache
+            self.value_cache[layer_idx] = new_value_cache
+            
+            print(f"Initialized cache to size {needed_size}")
+            return key_states, value_states
         else:
             current_length = self.key_cache[layer_idx].shape[-2]
             new_length = current_length + key_states.shape[-2]
+            return_length = new_length  # Length of tensor to return
             
-            # Calculate needed chunks
-            needed_size = ((new_length - 1) // self.chunk_size + 1) * self.chunk_size
-            
-            if needed_size > current_length:
+            # Calculate needed chunks - expand if we'll be at the last slot
+            if new_length >= current_length:
+                needed_size = ((new_length - 1) // self.chunk_size + 1) * self.chunk_size
+                
                 # Expand the cache to the next chunk boundary
                 device = self.key_cache[layer_idx].device
                 dtype = self.key_cache[layer_idx].dtype
@@ -81,9 +100,12 @@ class ChunkedDynamicCache:
                 
                 self.key_cache[layer_idx] = new_key_cache
                 self.value_cache[layer_idx] = new_value_cache
+                print(f"Expanded cache to size {needed_size}")
             
             # Add new states
             self.key_cache[layer_idx][..., current_length:new_length, :] = key_states
             self.value_cache[layer_idx][..., current_length:new_length, :] = value_states
             
-        return self.key_cache[layer_idx], self.value_cache[layer_idx]
+            # Return only the actually used portion
+            return (self.key_cache[layer_idx][..., :return_length, :], 
+                   self.value_cache[layer_idx][..., :return_length, :])

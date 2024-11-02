@@ -98,8 +98,8 @@ def generate_step(
     attention_mask, position_ids = mask_pos_generator(generated)
     cache_position = torch.arange(attention_mask.shape[1], device=input_ids.device)[-input_ids.shape[1]:]
     position_ids = position_ids[:, -input_ids.shape[1]:]
-    if isinstance(past_key_values, ChunkedDynamicCache):
-        kv_size = past_key_values.current_size()
+    if isinstance(past_key_values, ChunkedDynamicCache) and past_key_values.get_seq_length() > 0:
+        kv_size = past_key_values.get_seq_length()
         # Pad mask to mask the kv len
         b, s = attention_mask.shape
         to_add = torch.zeros((b, kv_size - s), device=attention_mask.device, dtype=attention_mask.dtype)
