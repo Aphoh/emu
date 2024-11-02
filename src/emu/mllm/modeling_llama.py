@@ -50,7 +50,7 @@ from transformers.utils import (
 )
 from transformers import LlamaConfig
 
-from ..fa2_mask.fa2_custom_mask import flash_attention_custom_mask
+from ..fa2_mask.fa_bias import flash_attn_func
 
 
 logger = logging.get_logger(__name__)
@@ -592,17 +592,18 @@ class LlamaSdpaAttention(LlamaAttention):
 
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and causal_mask is not None:
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
+        #if query_states.device.type == "cuda" and causal_mask is not None:
+        #    query_states = query_states.contiguous()
+        #    key_states = key_states.contiguous()
+        #    value_states = value_states.contiguous()
 
         # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
         # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
         is_causal = True if causal_mask is None and q_len > 1 else False
 
-        print("mask shape", causal_mask.shape)
-        attn_output = flash_attention_custom_mask(query_states, key_states, value_states, causal_mask)
+        print("mask shape", causal_mask.shape, "query_states shape", query_states.shape, "key_states shape", key_states.shape, "value_states shape", value_states.shape)
+        #attn_output = flash_attention_custom_mask(query_states, key_states, value_states, causal_mask)
+        attn_output = flash_attn_func(query_states, key_states, value_states, causal_mask, True)
         #attn_output = torch.nn.functional.scaled_dot_product_attention(
         #    query_states,
         #    key_states,
