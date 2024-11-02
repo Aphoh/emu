@@ -22,6 +22,7 @@
 from typing import Optional
 
 from transformers.configuration_utils import PretrainedConfig
+from transformers import LlamaConfig
 from transformers.utils import logging
 
 
@@ -189,6 +190,32 @@ class Emu3Config(PretrainedConfig):
             eos_token_id=eos_token_id,
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
+        )
+
+    def to_llama(self) -> LlamaConfig:
+        """
+        Convert the configuration to a `LlamaConfig` that can be used to instantiate a `LlamaModel`.
+        """
+        return LlamaConfig(
+            vocab_size=self.vocab_size,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+            num_hidden_layers=self.num_hidden_layers,
+            num_attention_heads=self.num_attention_heads,
+            num_key_value_heads=self.num_key_value_heads,
+            hidden_act=self.hidden_act,
+            max_position_embeddings=self.max_position_embeddings,
+            initializer_range=self.initializer_range,
+            rms_norm_eps=self.rms_norm_eps,
+            use_cache=self.use_cache,
+            pad_token_id=self.pad_token_id,
+            bos_token_id=self.bos_token_id,
+            eos_token_id=self.eos_token_id,
+            pretraining_tp=self.pretraining_tp,
+            tie_word_embeddings=self.tie_word_embeddings,
+            rope_theta=self.rope_theta,
+            rope_scaling=self.rope_scaling,
+            attention_dropout=self.attention_dropout,
         )
 
     def _rope_scaling_validation(self):

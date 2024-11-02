@@ -5,11 +5,12 @@ from typing import Optional
 from PIL import Image
 import torch
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModel, AutoImageProcessor, DynamicCache
+from transformers import AutoTokenizer, AutoModel, AutoImageProcessor, LlamaConfig, StaticCache
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from accelerate import init_empty_weights, load_checkpoint_in_model
 from emu.mllm.configuration_emu3 import Emu3Config
 from emu.run.utils import MaskPosGenerator
-from ..mllm.modeling_emu3 import Emu3ForCausalLM
+from ..mllm.modeling_llama import LlamaForCausalLM
 from ..mllm.processor import (
     PrefixConstrainedLogitsProcessor,
     ClassifierFreeGuidanceLogitsProcessor,
@@ -94,12 +95,21 @@ def generate_step(
 ):
     input_ids = next_tokens if next_tokens is not None else generated
     attention_mask, position_ids = mask_pos_generator(generated)
+    cache_position = position_ids.clone()
     position_ids = position_ids[:, -input_ids.shape[1]:]
+    if isinstance(past_key_values, StaticCache):
+        kv_size = past_key_values.max_cache_len
+        # Pad mask to mask the kv len
+        b, s = attention_mask.shape
+        to_add = torch.zeros((b, kv_size - s), device=attention_mask.device, dtype=attention_mask.dtype)
+        attention_mask = torch.cat([attention_mask, to_add], dim=1)
+
     outputs = model_fn(
         input_ids=input_ids,
         attention_mask=attention_mask,
         past_key_values=past_key_values,
         position_ids=position_ids,
+        cache_position=cache_position,
         use_cache=True,
         return_dict=True,
     )
@@ -139,14 +149,24 @@ def manual_generate(
     top_p=None,
     top_k=None,
     callback=None,
+    config=None
 ):
     """
     Manually generate tokens using past_key_values for efficiency
     Handles different lengths between positive and negative prompts
     """
 
+    kv_cache_len = initial_input_ids.shape[1] + 9000
+    # make sure the cache is a multiple of 128
+    kv_cache_len = (kv_cache_len // 128 + 1) * 128
     # Track generated sequence
-    past_key_values = DynamicCache()
+    past_key_values = StaticCache(
+        batch_size=initial_input_ids.shape[0],
+        max_cache_len=kv_cache_len,
+        device=initial_input_ids.device,
+        dtype=torch.bfloat16,
+        config=config
+    )
     generated, past_key_values, extras = generate_step(
         model_fn=model,
         generated=initial_input_ids,
@@ -159,7 +179,7 @@ def manual_generate(
         top_k=top_k,
     )
 
-    #model.forward = torch.compile(model.forward, mode="reduce-overhead")
+    model.forward = torch.compile(model.forward, mode="reduce-overhead", fullgraph=True)
 
     if callback is not None:
         callback(0, 1, generated, generated[:, -1])
@@ -171,19 +191,20 @@ def manual_generate(
         step_start_t = time.time()
         pbar.update(1)
         # Forward pass with only the new token and past_key_values
-        generated, past_key_values, extras = generate_step(
-            model_fn=model,
-            generated=generated,
-            next_tokens=generated[:, -1].unsqueeze(-1),
-            mask_pos_generator=mask_pos_generator,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            past_key_values=past_key_values,
-            cfg_proc=cfg_proc,
-            prefix_proc=prefix_proc,
-            extras=extras,
-        )
+        with sdpa_kernel([SDPBackend.MATH, SDPBackend.FLASH_ATTENTION]): # Actually better for Inductor to codegen attention here
+            generated, past_key_values, extras = generate_step(
+                model_fn=model,
+                generated=generated,
+                next_tokens=generated[:, -1].unsqueeze(-1),
+                mask_pos_generator=mask_pos_generator,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                past_key_values=past_key_values,
+                cfg_proc=cfg_proc,
+                prefix_proc=prefix_proc,
+                extras=extras,
+            )
         # Optional callback
         if callback is not None:
             pbar.set_description_str(
@@ -248,14 +269,20 @@ def main():
     top_k: int = args.top_k
     del args
 
+    torch._inductor.config.coordinate_descent_tuning = True
+    torch._inductor.config.triton.unique_kernel_names = True
+    # Experimental features to reduce compilation times, will be on by default in future
+    torch._inductor.config.fx_graph_cache = True 
+    #torch._functorch.config.enable_autograd_cache = True
+
     # Model initialization with data parallelism
     model_dl = snapshot_download(EMU_HUB)
-    config = Emu3Config.from_json_file(f"{model_dl}/config.json")
-    config._attn_implementation = "sdpa"
+    config: Emu3Config = Emu3Config.from_json_file(f"{model_dl}/config.json")
+    llama_config: LlamaConfig = config.to_llama()
 
     # Initialize model
     with init_empty_weights():
-        model = Emu3ForCausalLM(config)
+        model = LlamaForCausalLM(llama_config)
 
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
@@ -280,7 +307,7 @@ def main():
         AutoModel.from_pretrained(VQ_HUB, trust_remote_code=True).to(device).eval()
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        EMU_HUB, trust_remote_code=True, padding_side="right"
+        EMU_HUB, trust_remote_code=True, padding_side="right",
     )
     processor = Emu3Processor(image_processor, image_tokenizer, tokenizer)
 
@@ -323,6 +350,7 @@ def main():
             top_p=top_p,
             top_k=top_k,
             callback=generation_callback,
+            config=llama_config,
         )
 
     columns = ["cfg", "pag", "image", "text"]
