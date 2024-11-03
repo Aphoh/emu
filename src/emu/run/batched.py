@@ -230,8 +230,16 @@ def manual_generate(
                 )
             )
 
-        # Check if we've hit the EOS token for all sequences
+        # Check if we've hit the EOS token for a sequence
         if (generated[:, -1] == tokenizer.eos_token_id).all():
+            break
+        elif (generated[:, -1] == tokenizer.eos_token_id).any():
+            print("WOAH THIS IS A BUG")
+            print("expected all to be", tokenizer.eos_token_id)
+            print("got", generated[:, -1])
+            break
+        elif i >= 8195:
+            print("Breaking due to max length")
             break
         i += 1
 
