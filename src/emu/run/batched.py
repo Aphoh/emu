@@ -291,7 +291,7 @@ def main():
     prompts: List[str] = args.p
     if len(prompts) == 0:
         prompts = ["a shiba inu"]
-    output_dirs: List[str] = []
+    output_dirs: List[str] = args.o
     if output_dirs:
         assert len(prompts) == len(output_dirs), "Number of prompts and output directories must match"
     num_images: int = args.num_images
@@ -356,16 +356,14 @@ def main():
     is_pag = pag_scale > 0
 
     pos_prompts = []
-    neg_prompts = []
-    neg_prompt = ""
+    for prompt in prompts:
+        pos_prompts.extend([prompt] * num_images)
+    neg_prompts = [""] * len(pos_prompts)
 
     num_pos = num_images if not is_pag else 2 * num_images # 2x for PAG
     num_neg = 0 if not is_cfg else num_images 
-    for prompt in prompts:
-        pos_prompts.extend([prompt] * num_pos)
-        neg_prompts.extend([neg_prompt] * num_neg)
 
-    text_inputs = pos_prompts + neg_prompts
+    text_inputs = (pos_prompts * num_pos) + (neg_prompts * num_neg)
     inputs = processor(
         text=text_inputs,
         mode="G",
@@ -405,14 +403,14 @@ def main():
 
     if tp_rank == 0:
         images = []
-        for i, tokens in enumerate(generated_tokens[:num_images]):
+        for i, tokens in enumerate(generated_tokens[:num_images * len(prompts)]):
             mm_list = processor.decode(tokens)
             for idx_j, im in enumerate(mm_list):
                 if not isinstance(im, Image.Image):
                     continue
                 if output_dirs:
-                    dir_idx = i // num_images
-                    img_idx = i % num_images
+                    dir_idx = i % num_images
+                    img_idx = i // num_images
                     out_dir = Path(output_dirs[dir_idx])
                     out_dir.mkdir(parents=True, exist_ok=True)
                     out_path = out_dir / f"{img_idx:04}.png"
