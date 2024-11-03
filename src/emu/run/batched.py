@@ -1,7 +1,7 @@
 import argparse
 from collections import defaultdict
 import os
-from typing import Optional
+from typing import List, Optional
 from PIL import Image
 import torch
 import torch.distributed
@@ -243,7 +243,10 @@ def manual_generate(
 def parse_args():
     parser = argparse.ArgumentParser(description="Image generation")
     parser.add_argument(
-        "-p", "--prompt", type=str, default="a shiba inu", help="input text"
+        "-p", action="append", help="input prompts",
+    )
+    parser.add_argument(
+        "-o", action="append", help="output directory",
     )
     parser.add_argument(
         "--num_images", type=int, default=1, help="number of images to generate"
@@ -285,7 +288,12 @@ def main():
     if is_tp:
         device_mesh = init_device_mesh("cuda", (torch.cuda.device_count(),))
 
-    prompt: str = args.prompt
+    prompts: List[str] = args.p
+    if len(prompts) == 0:
+        prompts = ["a shiba inu"]
+    output_dirs: List[str] = []
+    if output_dirs:
+        assert len(prompts) == len(output_dirs), "Number of prompts and output directories must match"
     num_images: int = args.num_images
     pag_pos: bool = not args.pag_no_pos
     cfg_scale: float = args.cfg_scale
@@ -342,16 +350,22 @@ def main():
     )
     processor = Emu3Processor(image_processor, image_tokenizer, tokenizer)
 
-    # Prepare input
-    pos_prompt = prompt
-    neg_prompt = ""
 
+    # Prepare input
     is_cfg = cfg_scale > 0
     is_pag = pag_scale > 0
 
+    pos_prompts = []
+    neg_prompts = []
+    neg_prompt = ""
+
     num_pos = num_images if not is_pag else 2 * num_images # 2x for PAG
     num_neg = 0 if not is_cfg else num_images 
-    text_inputs = ([pos_prompt] * num_pos) + ([neg_prompt] * num_neg)
+    for prompt in prompts:
+        pos_prompts.extend([prompt] * num_pos)
+        neg_prompts.extend([neg_prompt] * num_neg)
+
+    text_inputs = pos_prompts + neg_prompts
     inputs = processor(
         text=text_inputs,
         mode="G",
@@ -390,16 +404,22 @@ def main():
         )
 
     if tp_rank == 0:
-        columns = ["cfg", "pag", "image", "text"]
-        rows = []
+        images = []
         for i, tokens in enumerate(generated_tokens[:num_images]):
             mm_list = processor.decode(tokens)
             for idx_j, im in enumerate(mm_list):
                 if not isinstance(im, Image.Image):
                     continue
-                rows.append([cfg_scale, pag_scale, wandb.Image(im), text_inputs[i]])
+                if output_dirs:
+                    dir_idx = i // num_images
+                    img_idx = i % num_images
+                    out_dir = Path(output_dirs[dir_idx])
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    out_path = out_dir / f"{img_idx:04}.png"
+                    im.save(out_path)
+                images.append(wandb.Image(im))
 
-        wandb.log({"images": wandb.Table(data=rows, columns=columns)})
+        wandb.log({"images": images})
         # Log extras and generated_tokens to wandb
         out_dir = Path(f"./outputs/{str(wandb.run.id)}")
         out_dir.mkdir(parents=True, exist_ok=True)
