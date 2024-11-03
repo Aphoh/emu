@@ -108,7 +108,8 @@ def generate_step(
         to_add = torch.zeros((b, kv_size - s), device=attention_mask.device, dtype=attention_mask.dtype)
         attention_mask = torch.cat([attention_mask, to_add], dim=1)
 
-    print(f"Attention mask shape: {attention_mask.shape}, cache_kv_len: {past_key_values.key_cache.shape}")
+    #kv_shape = past_key_values.key_cache[0].shape if past_key_values.key_cache else -1
+    #print(f"Attention mask shape: {attention_mask.shape}, cache_kv_len: {kv_shape} input_ids: {input_ids.shape}")
 
     outputs = model_fn(
         input_ids=input_ids,
@@ -224,6 +225,7 @@ def manual_generate(
                     generated,
                     generated[:, -1].unsqueeze(-1),
                     past_key_values,
+                    tp_rank=tp_rank,
                 )
             )
 
@@ -269,15 +271,19 @@ def generation_callback(step, step_time, generated, next_tokens, past_key_values
 def main():
     args = parse_args()
 
-    tp_rank = os.environ.get("RANK", 0)
+    tp_rank = int(os.environ.get("RANK", 0))
+    device = torch.device(f"cuda:{tp_rank}")
+    torch.cuda.set_device(device)
+    print(f"TP RANK: {tp_rank}, cuda_devs: {torch.cuda.device_count()}")
     is_tp = "RANK" in os.environ
 
     if tp_rank == 0:
+        print("Initializing wandb")
         wandb.init(project="cfg-stuff", config=vars(args))
 
     device_mesh = None
     if is_tp:
-        device_mesh = init_device_mesh("cuda", (torch.cuda.device_count(),), ("tp",))
+        device_mesh = init_device_mesh("cuda", (torch.cuda.device_count(),))
 
     prompt: str = args.prompt
     num_images: int = args.num_images
@@ -296,10 +302,13 @@ def main():
     #torch._functorch.config.enable_autograd_cache = True
 
     # Model initialization with data parallelism
+    model_dl = None
     if tp_rank == 0:
         model_dl = snapshot_download(EMU_HUB)
     if device_mesh is not None:
         torch.distributed.barrier() 
+    if model_dl is None:
+        model_dl = snapshot_download(EMU_HUB)
     config: Emu3Config = Emu3Config.from_json_file(f"{model_dl}/config.json")
     llama_config: LlamaConfig = config.to_llama()
 
@@ -307,14 +316,13 @@ def main():
     with init_empty_weights():
         model = LlamaForCausalLM(llama_config)
 
-    device = torch.device("cuda:0")
-    torch.cuda.set_device(device)
 
     # Load state dict
     print("Loading state dict")
     start_t = time.time()
+    dev_str = f"cuda:{tp_rank}"
     load_checkpoint_in_model(
-        model, model_dl, device_map={"model": 0, "lm_head": 0}, dtype=torch.bfloat16
+        model, model_dl, device_map={"model": dev_str, "lm_head": dev_str}, dtype=torch.bfloat16
     )
     model = model.to(device, dtype=torch.bfloat16)
     model.eval()  # Set to evaluation mode
@@ -365,7 +373,7 @@ def main():
         print("Rank ", tp_rank, "sharded model between", device_mesh.size(), "devices")
 
     # Manual generation
-    with torch.inference_mode():
+    with torch.no_grad():
         generated_tokens, extras = manual_generate(
             model=model,
             initial_input_ids=inputs.input_ids.to(device),

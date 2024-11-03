@@ -1,7 +1,7 @@
 
 
 import torch
-from torch.distributed.tensor.parallel import parallelize_module, ColwiseParallel, RowwiseParallel
+from torch.distributed.tensor.parallel import parallelize_module, ColwiseParallel, RowwiseParallel, PrepareModuleInput
 from torch.distributed._tensor import Replicate
 from torch.distributed.device_mesh import init_device_mesh, DeviceMesh
 
@@ -13,6 +13,8 @@ def get_tensor_sharded_model(model: LlamaForCausalLM, mesh: DeviceMesh):
     mesh = init_device_mesh(device, (NUM_DEVICES,))
 
     layer_tp_plan = {
+        #"self_attn": PrepareModuleInput(),
+        #"mlp": PrepareModuleInput(),
         "mlp.up_proj": ColwiseParallel(),
         "mlp.gate_proj": ColwiseParallel(),
         "mlp.down_proj": RowwiseParallel(),
@@ -24,13 +26,13 @@ def get_tensor_sharded_model(model: LlamaForCausalLM, mesh: DeviceMesh):
 
     for layer in model.model.layers:
         attn: LlamaAttention = layer.self_attn
-        attn.num_heads // mesh.size()
-        attn.num_key_value_heads // mesh.size()
+        attn.num_heads //=  mesh.size()
+        attn.num_key_value_heads //= mesh.size()
         parallelize_module(layer, mesh, layer_tp_plan)
 
     # Parallelize the embedding submodules.
     
-    parallelize_module(model.model.embed_tokens, mesh, RowwiseParallel(output_layouts=Replicate()))
+    #parallelize_module(model.model.embed_tokens, mesh, RowwiseParallel(output_layouts=Replicate()))
     parallelize_module(model.lm_head, mesh, ColwiseParallel(output_layouts=Replicate()))
 
     return model
