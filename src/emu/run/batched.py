@@ -4,6 +4,7 @@ import os
 from typing import Optional
 from PIL import Image
 import torch
+import torch.distributed
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel, AutoImageProcessor, LlamaConfig, StaticCache, DynamicCache
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -22,6 +23,8 @@ import time
 from tqdm import tqdm
 from emu.mllm.processing_emu3 import Emu3Processor
 import wandb
+from torch.distributed.device_mesh import init_device_mesh
+from ..mllm.parallel import get_tensor_sharded_model
 
 # model path
 EMU_HUB = "BAAI/Emu3-Gen"
@@ -105,13 +108,7 @@ def generate_step(
         to_add = torch.zeros((b, kv_size - s), device=attention_mask.device, dtype=attention_mask.dtype)
         attention_mask = torch.cat([attention_mask, to_add], dim=1)
 
-
-    #if isinstance(past_key_values, StaticCache):
-    #    kv_size = past_key_values.max_cache_len
-    #    # Pad mask to mask the kv len
-    #    b, s = attention_mask.shape
-    #    to_add = torch.zeros((b, kv_size - s), device=attention_mask.device, dtype=attention_mask.dtype)
-    #    attention_mask = torch.cat([attention_mask, to_add], dim=1)
+    print(f"Attention mask shape: {attention_mask.shape}, cache_kv_len: {past_key_values.key_cache.shape}")
 
     outputs = model_fn(
         input_ids=input_ids,
@@ -158,7 +155,8 @@ def manual_generate(
     top_p=None,
     top_k=None,
     callback=None,
-    config=None
+    config=None,
+    tp_rank=0,
 ):
     """
     Manually generate tokens using past_key_values for efficiency
@@ -198,7 +196,7 @@ def manual_generate(
 
     start_t = time.time()
     i = 0
-    pbar = tqdm(total=8191, disable=bool(os.environ.get("TQDM_DISABLE", False)))
+    pbar = tqdm(total=8191, disable=bool(os.environ.get("TQDM_DISABLE", False) or tp_rank != 0))
     while True:
         step_start_t = time.time()
         pbar.update(1)
@@ -257,20 +255,30 @@ def parse_args():
     return parser.parse_args()
 
 
-def generation_callback(step, step_time, generated, next_tokens, past_key_values=None):
+def generation_callback(step, step_time, generated, next_tokens, past_key_values=None, tp_rank=0):
     """
     Example callback function with access to past_key_values
     """
     num_tokens = next_tokens.numel()
     tps = num_tokens / step_time
-    wandb.log({"tps": tps})
+    if tp_rank == 0:
+        wandb.log({"tps": tps})
     return f"Step {step}: curr_len: {generated.size(1)}, tps: {tps:.2f}"
 
 
 def main():
     args = parse_args()
 
-    wandb.init(project="cfg-stuff", config=vars(args))
+    tp_rank = os.environ.get("RANK", 0)
+    is_tp = "RANK" in os.environ
+
+    if tp_rank == 0:
+        wandb.init(project="cfg-stuff", config=vars(args))
+
+    device_mesh = None
+    if is_tp:
+        device_mesh = init_device_mesh("cuda", (torch.cuda.device_count(),), ("tp",))
+
     prompt: str = args.prompt
     num_images: int = args.num_images
     pag_pos: bool = not args.pag_no_pos
@@ -288,7 +296,10 @@ def main():
     #torch._functorch.config.enable_autograd_cache = True
 
     # Model initialization with data parallelism
-    model_dl = snapshot_download(EMU_HUB)
+    if tp_rank == 0:
+        model_dl = snapshot_download(EMU_HUB)
+    if device_mesh is not None:
+        torch.distributed.barrier() 
     config: Emu3Config = Emu3Config.from_json_file(f"{model_dl}/config.json")
     llama_config: LlamaConfig = config.to_llama()
 
@@ -349,6 +360,10 @@ def main():
     cfg_proc = ClassifierFreeGuidanceLogitsProcessor(cfg_scale, pag_scale)
     mask_pos_generator = MaskPosGenerator(inputs.attention_mask.to(device), is_cfg, is_pag, pag_with_position=pag_pos)
 
+    if tp_rank is not None:
+        model = get_tensor_sharded_model(model, device_mesh)
+        print("Rank ", tp_rank, "sharded model between", device_mesh.size(), "devices")
+
     # Manual generation
     with torch.inference_mode():
         generated_tokens, extras = manual_generate(
@@ -363,24 +378,29 @@ def main():
             top_k=top_k,
             callback=generation_callback,
             config=llama_config,
+            tp_rank=tp_rank,
         )
 
-    columns = ["cfg", "pag", "image", "text"]
-    rows = []
-    for i, tokens in enumerate(generated_tokens[:num_images]):
-        mm_list = processor.decode(tokens)
-        for idx_j, im in enumerate(mm_list):
-            if not isinstance(im, Image.Image):
-                continue
-            rows.append([cfg_scale, pag_scale, wandb.Image(im), text_inputs[i]])
+    if tp_rank == 0:
+        columns = ["cfg", "pag", "image", "text"]
+        rows = []
+        for i, tokens in enumerate(generated_tokens[:num_images]):
+            mm_list = processor.decode(tokens)
+            for idx_j, im in enumerate(mm_list):
+                if not isinstance(im, Image.Image):
+                    continue
+                rows.append([cfg_scale, pag_scale, wandb.Image(im), text_inputs[i]])
 
-    wandb.log({"images": wandb.Table(data=rows, columns=columns)})
-    # Log extras and generated_tokens to wandb
-    out_dir = Path(f"./outputs/{str(wandb.run.id)}")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(extras, out_dir / "extras.pt")
-    torch.save(generated_tokens, out_dir / "generated_tokens.pt")
-    wandb.save(str(out_dir) + "/*", policy="end")
+        wandb.log({"images": wandb.Table(data=rows, columns=columns)})
+        # Log extras and generated_tokens to wandb
+        out_dir = Path(f"./outputs/{str(wandb.run.id)}")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(extras, out_dir / "extras.pt")
+        torch.save(generated_tokens, out_dir / "generated_tokens.pt")
+        wandb.save(str(out_dir) + "/*", policy="end")
+
+    if is_tp:
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

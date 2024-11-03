@@ -11,7 +11,7 @@ class ChunkedDynamicCache(Cache):
     
     def __init__(self) -> None:
         self.chunk_size = 128
-        self._seen_tokens = 0
+        self.inserted_tokens = 0
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
         
@@ -21,10 +21,11 @@ class ChunkedDynamicCache(Cache):
         
     def get_seq_length(self, layer_idx = 0):
         if len(self.key_cache) > layer_idx:
-            return self._seen_tokens if layer_idx == 0 else self.key_cache[layer_idx].shape[-2]
+            return self.key_cache[layer_idx].shape[-2]
         else:
             return 0
         
+    @torch.compiler.disable
     def update(
         self,
         key_states: torch.Tensor,
@@ -44,10 +45,9 @@ class ChunkedDynamicCache(Cache):
         Returns:
             Tuple of the updated key and value states
         """
-        # Update seen tokens count for first layer
-        if layer_idx == 0:
-            self._seen_tokens += key_states.shape[-2]
             
+        if layer_idx == 0:
+            self.inserted_tokens += key_states.shape[-2]
         # Initialize layer caches if needed
         while len(self.key_cache) <= layer_idx:
             self.key_cache.append([])
@@ -75,7 +75,7 @@ class ChunkedDynamicCache(Cache):
             print(f"Initialized cache to size {needed_size}")
             return key_states, value_states
         else:
-            current_length = self.key_cache[layer_idx].shape[-2]
+            current_length = self.inserted_tokens
             new_length = current_length + key_states.shape[-2]
             return_length = new_length  # Length of tensor to return
             
