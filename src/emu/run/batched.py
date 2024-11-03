@@ -105,8 +105,9 @@ def generate_step(
         kv_size = past_key_values.get_seq_length()
         # Pad mask to mask the kv len
         b, s = attention_mask.shape
-        to_add = torch.zeros((b, kv_size - s), device=attention_mask.device, dtype=attention_mask.dtype)
-        attention_mask = torch.cat([attention_mask, to_add], dim=1)
+        if kv_size - s > 0:
+            to_add = torch.zeros((b, kv_size - s), device=attention_mask.device, dtype=attention_mask.dtype)
+            attention_mask = torch.cat([attention_mask, to_add], dim=1)
 
     #kv_shape = past_key_values.key_cache[0].shape if past_key_values.key_cache else -1
     #print(f"Attention mask shape: {attention_mask.shape}, cache_kv_len: {kv_shape} input_ids: {input_ids.shape}")
@@ -175,7 +176,7 @@ def manual_generate(
     #    dtype=torch.bfloat16,
     #    config=config
     #)
-    past_key_values = DynamicCache()
+    past_key_values = ChunkedDynamicCache()
     generated, past_key_values, extras = generate_step(
         model_fn=model,
         generated=initial_input_ids,
@@ -360,8 +361,8 @@ def main():
         pos_prompts.extend([prompt] * num_images)
     neg_prompts = [""] * len(pos_prompts)
 
-    num_pos = num_images if not is_pag else 2 * num_images # 2x for PAG
-    num_neg = 0 if not is_cfg else num_images 
+    num_pos = 1 if not is_pag else 2 # 2x for PAG
+    num_neg = 0 if not is_cfg else 1 
 
     text_inputs = (pos_prompts * num_pos) + (neg_prompts * num_neg)
     inputs = processor(
@@ -409,8 +410,11 @@ def main():
                 if not isinstance(im, Image.Image):
                     continue
                 if output_dirs:
-                    dir_idx = i % num_images
-                    img_idx = i // num_images
+                    dir_idx = i // num_images # first num_images are the first dir, etc
+                    img_idx = i % num_images # image index within the dir
+                    if dir_idx >= len(output_dirs):
+                        print("This shouldn't happen, saving to last dir")
+                        dir_idx = len(output_dirs) - 1
                     out_dir = Path(output_dirs[dir_idx])
                     out_dir.mkdir(parents=True, exist_ok=True)
                     out_path = out_dir / f"{img_idx:04}.png"
