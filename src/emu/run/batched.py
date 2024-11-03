@@ -175,7 +175,7 @@ def manual_generate(
     #    dtype=torch.bfloat16,
     #    config=config
     #)
-    past_key_values = ChunkedDynamicCache()
+    past_key_values = DynamicCache()
     generated, past_key_values, extras = generate_step(
         model_fn=model,
         generated=initial_input_ids,
@@ -189,11 +189,11 @@ def manual_generate(
     )
 
     # Bug in torch dynamo with scaled_dot_product_attention
-    torch._dynamo.disallow_in_graph(torch.nn.functional.scaled_dot_product_attention)
-    model.forward = torch.compile(model.forward, mode="reduce-overhead")
+    #torch._dynamo.disallow_in_graph(torch.nn.functional.scaled_dot_product_attention)
+    #model.forward = torch.compile(model.forward, mode="reduce-overhead")
 
     if callback is not None:
-        callback(0, 1, generated, generated[:, -1])
+        callback(0, 1, generated, generated[:, -1], tp_rank=tp_rank)
 
     start_t = time.time()
     i = 0
@@ -368,7 +368,7 @@ def main():
     cfg_proc = ClassifierFreeGuidanceLogitsProcessor(cfg_scale, pag_scale)
     mask_pos_generator = MaskPosGenerator(inputs.attention_mask.to(device), is_cfg, is_pag, pag_with_position=pag_pos)
 
-    if tp_rank is not None:
+    if is_tp:
         model = get_tensor_sharded_model(model, device_mesh)
         print("Rank ", tp_rank, "sharded model between", device_mesh.size(), "devices")
 

@@ -8,10 +8,6 @@ from torch.distributed.device_mesh import init_device_mesh, DeviceMesh
 from emu.mllm.modeling_llama import LlamaAttention, LlamaForCausalLM
 
 def get_tensor_sharded_model(model: LlamaForCausalLM, mesh: DeviceMesh):
-    NUM_DEVICES = torch.cuda.device_count()
-    device = "cuda" if torch.cuda.is_available() else "cpu" 
-    mesh = init_device_mesh(device, (NUM_DEVICES,))
-
     layer_tp_plan = {
         #"self_attn": PrepareModuleInput(),
         #"mlp": PrepareModuleInput(),
