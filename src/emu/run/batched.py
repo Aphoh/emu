@@ -121,28 +121,34 @@ def generate_step(
         use_cache=True,
         return_dict=True,
     )
-    logits = outputs.logits[:, -1, :]
+    base_logits = outputs.logits[:, -1, :]
+    base_logprobs = F.log_softmax(base_logits, dim=-1)
     past_key_values = outputs.past_key_values
 
+    if extras is None:
+        extras = defaultdict(list)
+    topk_logprobs = base_logprobs.topk(100, dim=-1)
+    extras["logprob_hist_vals"].append(topk_logprobs.values)
+    extras["logprob_hist_inds"].append(topk_logprobs.indices)
+
     # Process logits
+    new_logits = base_logits.clone()
     if cfg_proc is not None:
-        logits, expand_factor = cfg_proc(generated, logits)
+        new_logits, expand_factor = cfg_proc(generated, new_logits)
     if prefix_proc is not None:
-        logits = prefix_proc(generated[: logits.shape[0]], logits)
+        new_logits = prefix_proc(generated[: new_logits.shape[0]], new_logits)
 
     # Sample next token
     next_tokens = sample_from_logits(
-        logits, temperature=temperature, top_p=top_p, top_k=top_k
+        new_logits, temperature=temperature, top_p=top_p, top_k=top_k
     )
     if expand_factor > 1:
         next_tokens = next_tokens.repeat(expand_factor)
+
+    samples_logprobs = base_logprobs.gather(1, next_tokens.unsqueeze(-1)).squeeze(-1)
+    extras["sampled_logprobs"].append(samples_logprobs)
     new_generated = torch.cat([generated, next_tokens.unsqueeze(1)], dim=1)
     # Extend attention mask for new token
-    if extras is None:
-        extras = defaultdict(list)
-    topk_logits = logits.topk(100, dim=-1)
-    extras["logit_hist_vals"].append(topk_logits.values)
-    extras["logit_hist_inds"].append(topk_logits.indices)
     return new_generated, past_key_values, extras
 
 
