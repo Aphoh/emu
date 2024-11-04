@@ -361,7 +361,7 @@ def main():
         AutoModel.from_pretrained(VQ_HUB, trust_remote_code=True).to(device).eval()
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        EMU_HUB, trust_remote_code=True, padding_side="right",
+        EMU_HUB, trust_remote_code=True, padding_side="left",
     )
     processor = Emu3Processor(image_processor, image_tokenizer, tokenizer)
 
