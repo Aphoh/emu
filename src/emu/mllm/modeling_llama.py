@@ -50,8 +50,6 @@ from transformers.utils import (
 )
 from transformers import LlamaConfig
 
-from ..fa2_mask.fa_bias import flash_attn_func
-
 
 logger = logging.get_logger(__name__)
 

@@ -1,12 +1,19 @@
 import argparse
 from collections import defaultdict
 import os
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from PIL import Image
 import torch
 import torch.distributed
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModel, AutoImageProcessor, LlamaConfig, StaticCache, DynamicCache
+from transformers import (
+    AutoTokenizer,
+    AutoModel,
+    AutoImageProcessor,
+    LlamaConfig,
+    StaticCache,
+    DynamicCache,
+)
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from accelerate import init_empty_weights, load_checkpoint_in_model
 from emu.mllm.configuration_emu3 import Emu3Config
@@ -99,18 +106,27 @@ def generate_step(
 ):
     input_ids = next_tokens if next_tokens is not None else generated
     attention_mask, position_ids = mask_pos_generator(generated)
-    cache_position = torch.arange(attention_mask.shape[1], device=input_ids.device)[-input_ids.shape[1]:]
-    position_ids = position_ids[:, -input_ids.shape[1]:]
-    if isinstance(past_key_values, ChunkedDynamicCache) and past_key_values.get_seq_length() > 0:
+    cache_position = torch.arange(attention_mask.shape[1], device=input_ids.device)[
+        -input_ids.shape[1] :
+    ]
+    position_ids = position_ids[:, -input_ids.shape[1] :]
+    if (
+        isinstance(past_key_values, ChunkedDynamicCache)
+        and past_key_values.get_seq_length() > 0
+    ):
         kv_size = past_key_values.get_seq_length()
         # Pad mask to mask the kv len
         b, s = attention_mask.shape
         if kv_size - s > 0:
-            to_add = torch.zeros((b, kv_size - s), device=attention_mask.device, dtype=attention_mask.dtype)
+            to_add = torch.zeros(
+                (b, kv_size - s),
+                device=attention_mask.device,
+                dtype=attention_mask.dtype,
+            )
             attention_mask = torch.cat([attention_mask, to_add], dim=1)
 
-    #kv_shape = past_key_values.key_cache[0].shape if past_key_values.key_cache else -1
-    #print(f"Attention mask shape: {attention_mask.shape}, cache_kv_len: {kv_shape} input_ids: {input_ids.shape}")
+    # kv_shape = past_key_values.key_cache[0].shape if past_key_values.key_cache else -1
+    # print(f"Attention mask shape: {attention_mask.shape}, cache_kv_len: {kv_shape} input_ids: {input_ids.shape}")
 
     outputs = model_fn(
         input_ids=input_ids,
@@ -175,13 +191,13 @@ def manual_generate(
     # make sure the cache is a multiple of 128
     kv_cache_len = (kv_cache_len // 128 + 1) * 128
     # Track generated sequence
-    #past_key_values = StaticCache(
+    # past_key_values = StaticCache(
     #    batch_size=initial_input_ids.shape[0],
     #    max_cache_len=kv_cache_len,
     #    device=initial_input_ids.device,
     #    dtype=torch.bfloat16,
     #    config=config
-    #)
+    # )
     past_key_values = ChunkedDynamicCache()
     generated, past_key_values, extras = generate_step(
         model_fn=model,
@@ -196,33 +212,34 @@ def manual_generate(
     )
 
     # Bug in torch dynamo with scaled_dot_product_attention
-    #torch._dynamo.disallow_in_graph(torch.nn.functional.scaled_dot_product_attention)
-    #model.forward = torch.compile(model.forward, mode="reduce-overhead")
+    # torch._dynamo.disallow_in_graph(torch.nn.functional.scaled_dot_product_attention)
+    # model.forward = torch.compile(model.forward, mode="reduce-overhead")
 
     if callback is not None:
         callback(0, 1, generated, generated[:, -1], tp_rank=tp_rank)
 
     start_t = time.time()
     i = 0
-    pbar = tqdm(total=8191, disable=bool(os.environ.get("TQDM_DISABLE", False) or tp_rank != 0))
+    pbar = tqdm(
+        total=8191, disable=bool(os.environ.get("TQDM_DISABLE", False) or tp_rank != 0)
+    )
     while True:
         step_start_t = time.time()
         pbar.update(1)
         # Forward pass with only the new token and past_key_values
-        with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]): # Actually better for Inductor to codegen attention here
-            generated, past_key_values, extras = generate_step(
-                model_fn=model,
-                generated=generated,
-                next_tokens=generated[:, -1].unsqueeze(-1),
-                mask_pos_generator=mask_pos_generator,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-                past_key_values=past_key_values,
-                cfg_proc=cfg_proc,
-                prefix_proc=prefix_proc,
-                extras=extras,
-            )
+        generated, past_key_values, extras = generate_step(
+            model_fn=model,
+            generated=generated,
+            next_tokens=generated[:, -1].unsqueeze(-1),
+            mask_pos_generator=mask_pos_generator,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            past_key_values=past_key_values,
+            cfg_proc=cfg_proc,
+            prefix_proc=prefix_proc,
+            extras=extras,
+        )
         # Optional callback
         if callback is not None:
             pbar.set_description_str(
@@ -258,10 +275,14 @@ def manual_generate(
 def parse_args():
     parser = argparse.ArgumentParser(description="Image generation")
     parser.add_argument(
-        "-p", action="append", help="input prompts",
+        "-p",
+        action="append",
+        help="input prompts",
     )
     parser.add_argument(
-        "-o", action="append", help="output directory",
+        "-o",
+        action="append",
+        help="output directory",
     )
     parser.add_argument(
         "--num_images", type=int, default=1, help="number of images to generate"
@@ -272,11 +293,18 @@ def parse_args():
     parser.add_argument("--temp", type=float, default=1.0, help="temperature")
     parser.add_argument("--top_p", type=float, help="top p")
     parser.add_argument("--top_k", type=float, default=2048, help="top k")
-    parser.add_argument("--extras", type=str, default="extras", help="directory to store extras")
+    parser.add_argument(
+        "--null_ident", action="store_true", help="null identity matrix in cfg"
+    )
+    parser.add_argument(
+        "--extras", type=str, default="extras", help="directory to store extras"
+    )
     return parser.parse_args()
 
 
-def generation_callback(step, step_time, generated, next_tokens, past_key_values=None, tp_rank=0):
+def generation_callback(
+    step, step_time, generated, next_tokens, past_key_values=None, tp_rank=0
+):
     """
     Example callback function with access to past_key_values
     """
@@ -286,6 +314,37 @@ def generation_callback(step, step_time, generated, next_tokens, past_key_values
         wandb.log({"tps": tps})
     return f"Step {step}: curr_len: {generated.size(1)}, tps: {tps:.2f}"
 
+def initialize_model(tp_rank, device_mesh, device) -> Tuple[LlamaForCausalLM, Emu3Config, LlamaConfig]:
+    # Model initialization with data parallelism
+    model_dl = None
+    if tp_rank == 0:
+        model_dl = snapshot_download(EMU_HUB)
+    if device_mesh is not None:
+        torch.distributed.barrier()
+    if model_dl is None:
+        model_dl = snapshot_download(EMU_HUB)
+    config: Emu3Config = Emu3Config.from_json_file(f"{model_dl}/config.json")
+    llama_config: LlamaConfig = config.to_llama()
+
+    # Initialize model
+    with init_empty_weights():
+        model = LlamaForCausalLM(llama_config)
+
+    # Load state dict
+    print("Loading state dict")
+    start_t = time.time()
+    dev_str = f"cuda:{tp_rank}"
+    load_checkpoint_in_model(
+        model,
+        model_dl,
+        device_map={"model": dev_str, "lm_head": dev_str},
+        dtype=torch.bfloat16,
+    )
+    model = model.to(device, dtype=torch.bfloat16)
+    model.eval()  # Set to evaluation mode
+    end_t = time.time()
+    print(f"State dict loaded in {end_t - start_t:.2f}s")
+    return model, config, llama_config
 
 def main():
     args = parse_args()
@@ -309,7 +368,9 @@ def main():
         prompts = ["a shiba inu"]
     output_dirs: List[str] = args.o
     if output_dirs:
-        assert len(prompts) == len(output_dirs), "Number of prompts and output directories must match"
+        assert len(prompts) == len(
+            output_dirs
+        ), "Number of prompts and output directories must match"
     num_images: int = args.num_images
     pag_pos: bool = not args.pag_no_pos
     cfg_scale: float = args.cfg_scale
@@ -318,41 +379,18 @@ def main():
     top_p: float = args.top_p
     top_k: int = args.top_k
     extras_dir: str = args.extras
+    null_ident: bool = args.null_ident
     del args
 
     torch._inductor.config.coordinate_descent_tuning = True
     torch._inductor.config.triton.unique_kernel_names = True
     # Experimental features to reduce compilation times, will be on by default in future
-    torch._inductor.config.fx_graph_cache = True 
-    #torch._functorch.config.enable_autograd_cache = True
+    torch._inductor.config.fx_graph_cache = True
+    # torch._functorch.config.enable_autograd_cache = True
 
-    # Model initialization with data parallelism
-    model_dl = None
-    if tp_rank == 0:
-        model_dl = snapshot_download(EMU_HUB)
-    if device_mesh is not None:
-        torch.distributed.barrier() 
-    if model_dl is None:
-        model_dl = snapshot_download(EMU_HUB)
-    config: Emu3Config = Emu3Config.from_json_file(f"{model_dl}/config.json")
-    llama_config: LlamaConfig = config.to_llama()
 
     # Initialize model
-    with init_empty_weights():
-        model = LlamaForCausalLM(llama_config)
-
-
-    # Load state dict
-    print("Loading state dict")
-    start_t = time.time()
-    dev_str = f"cuda:{tp_rank}"
-    load_checkpoint_in_model(
-        model, model_dl, device_map={"model": dev_str, "lm_head": dev_str}, dtype=torch.bfloat16
-    )
-    model = model.to(device, dtype=torch.bfloat16)
-    model.eval()  # Set to evaluation mode
-    end_t = time.time()
-    print(f"State dict loaded in {end_t - start_t:.2f}s")
+    model, config, llama_config = initialize_model(tp_rank, device_mesh, device)
 
     print("Preparing")
     # Wrap model with accelerator for data parallelism
@@ -363,10 +401,11 @@ def main():
         AutoModel.from_pretrained(VQ_HUB, trust_remote_code=True).to(device).eval()
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        EMU_HUB, trust_remote_code=True, padding_side="left",
+        EMU_HUB,
+        trust_remote_code=True,
+        padding_side="left",
     )
     processor = Emu3Processor(image_processor, image_tokenizer, tokenizer)
-
 
     # Prepare input
     is_cfg = cfg_scale > 0
@@ -377,8 +416,8 @@ def main():
         pos_prompts.extend([prompt] * num_images)
     neg_prompts = [""] * len(pos_prompts)
 
-    num_pos = 1 if not is_pag else 2 # 2x for PAG
-    num_neg = 0 if not is_cfg else 1 
+    num_pos = 1 if not is_pag else 2  # 2x for PAG
+    num_neg = 0 if not is_cfg else 1
 
     text_inputs = (pos_prompts * num_pos) + (neg_prompts * num_neg)
     inputs = processor(
@@ -395,7 +434,13 @@ def main():
     constrained_fn = processor.build_prefix_constrained_fn(h, w)
     prefix_proc = PrefixConstrainedLogitsProcessor(constrained_fn)
     cfg_proc = ClassifierFreeGuidanceLogitsProcessor(cfg_scale, pag_scale)
-    mask_pos_generator = MaskPosGenerator(inputs.attention_mask.to(device), is_cfg, is_pag, pag_with_position=pag_pos)
+    mask_pos_generator = MaskPosGenerator(
+        inputs.attention_mask.to(device),
+        is_cfg,
+        is_pag,
+        pag_with_position=pag_pos,
+        null_identity_map=null_ident,
+    )
 
     if is_tp:
         model = get_tensor_sharded_model(model, device_mesh)
@@ -420,14 +465,14 @@ def main():
 
     if tp_rank == 0:
         images = []
-        for i, tokens in enumerate(generated_tokens[:num_images * len(prompts)]):
+        for i, tokens in enumerate(generated_tokens[: num_images * len(prompts)]):
             mm_list = processor.decode(tokens)
             for idx_j, im in enumerate(mm_list):
                 if not isinstance(im, Image.Image):
                     continue
                 if output_dirs:
-                    dir_idx = i // num_images # first num_images are the first dir, etc
-                    img_idx = i % num_images # image index within the dir
+                    dir_idx = i // num_images  # first num_images are the first dir, etc
+                    img_idx = i % num_images  # image index within the dir
                     if dir_idx >= len(output_dirs):
                         print("This shouldn't happen, saving to last dir")
                         dir_idx = len(output_dirs) - 1
@@ -435,7 +480,7 @@ def main():
                     out_dir.mkdir(parents=True, exist_ok=True)
                     out_path = out_dir / f"{img_idx:04}.png"
                     im.save(out_path)
-                images.append(wandb.Image(im))
+                images.append(wandb.Image(im, file_type="jpg"))
 
         wandb.log({"images": images})
         # Log extras and generated_tokens to wandb
