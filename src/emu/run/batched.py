@@ -272,7 +272,7 @@ def parse_args():
     parser.add_argument("--temp", type=float, default=1.0, help="temperature")
     parser.add_argument("--top_p", type=float, help="top p")
     parser.add_argument("--top_k", type=float, default=2048, help="top k")
-    parser.add_argument("--extras", str="extras", help="directory to store extras")
+    parser.add_argument("--extras", type=str, default="extras", help="directory to store extras")
     return parser.parse_args()
 
 
@@ -317,7 +317,7 @@ def main():
     temperature: float = args.temp
     top_p: float = args.top_p
     top_k: int = args.top_k
-    extras: str = args.extras
+    extras_dir: str = args.extras
     del args
 
     torch._inductor.config.coordinate_descent_tuning = True
@@ -439,7 +439,7 @@ def main():
 
         wandb.log({"images": images})
         # Log extras and generated_tokens to wandb
-        out_dir = Path(extras) / str(wandb.run.id)
+        out_dir = Path(extras_dir) / str(wandb.run.id)
         out_dir.mkdir(parents=True, exist_ok=True)
         torch.save(extras, out_dir / "extras.pt")
         torch.save(generated_tokens, out_dir / "generated_tokens.pt")
