@@ -163,6 +163,11 @@ def generate_step(
 
     samples_logprobs = base_logprobs.gather(1, next_tokens.unsqueeze(-1)).squeeze(-1)
     extras["sampled_logprobs"].append(samples_logprobs)
+    if "cumprob" not in extras:
+        extras["cumprob"].append(samples_logprobs)
+    else:
+        extras["cumprob"].append(samples_logprobs + extras["cumprob"][-1])
+
     new_generated = torch.cat([generated, next_tokens.unsqueeze(1)], dim=1)
     # Extend attention mask for new token
     return new_generated, past_key_values, extras
@@ -181,6 +186,7 @@ def manual_generate(
     callback=None,
     config=None,
     tp_rank=0,
+    callback_kwargs={},
 ):
     """
     Manually generate tokens using past_key_values for efficiency
@@ -190,14 +196,6 @@ def manual_generate(
     kv_cache_len = initial_input_ids.shape[1] + 9000
     # make sure the cache is a multiple of 128
     kv_cache_len = (kv_cache_len // 128 + 1) * 128
-    # Track generated sequence
-    # past_key_values = StaticCache(
-    #    batch_size=initial_input_ids.shape[0],
-    #    max_cache_len=kv_cache_len,
-    #    device=initial_input_ids.device,
-    #    dtype=torch.bfloat16,
-    #    config=config
-    # )
     past_key_values = ChunkedDynamicCache()
     generated, past_key_values, extras = generate_step(
         model_fn=model,
@@ -216,7 +214,7 @@ def manual_generate(
     # model.forward = torch.compile(model.forward, mode="reduce-overhead")
 
     if callback is not None:
-        callback(0, 1, generated, generated[:, -1], tp_rank=tp_rank)
+        callback(0, 1, generated, generated[:, -1], tp_rank=tp_rank, **callback_kwargs)
 
     start_t = time.time()
     i = 0
@@ -248,8 +246,9 @@ def manual_generate(
                     time.time() - step_start_t,
                     generated,
                     generated[:, -1].unsqueeze(-1),
-                    past_key_values,
+                    extras,
                     tp_rank=tp_rank,
+                    **callback_kwargs
                 )
             )
 
@@ -297,24 +296,56 @@ def parse_args():
         "--null_ident", action="store_true", help="null identity matrix in cfg"
     )
     parser.add_argument(
+        "--cfg_clip_quantile", type=float, default=0.0, help="CFG clip quantile"
+    )
+    parser.add_argument(
+        "--cfg_logsm", action="store_true", help="CFG delta use log softmax"
+    )
+    parser.add_argument(
         "--extras", type=str, default="extras", help="directory to store extras"
     )
     return parser.parse_args()
 
 
 def generation_callback(
-    step, step_time, generated, next_tokens, past_key_values=None, tp_rank=0
+    step,
+    step_time,
+    generated,
+    next_tokens,
+    extras,
+    tp_rank=0,
+    is_cfg=False,
+    is_pag=False,
 ):
     """
     Example callback function with access to past_key_values
     """
     num_tokens = next_tokens.numel()
     tps = num_tokens / step_time
+
     if tp_rank == 0:
-        wandb.log({"tps": tps})
+        to_log = {"tps": tps}
+        cumprob = extras["cumprob"][-1]
+        for i in range(cumprob.size(0)):
+            to_log[f"cumprob_{i}"] = cumprob[i].item()
+        sampled_logprobs = extras["sampled_logprobs"][-1]
+        for i in range(sampled_logprobs.size(0)):
+            to_log[f"sampled_logprob_{i}"] = sampled_logprobs[i].item()
+        if is_cfg and not is_pag:
+            n_samp = cumprob.size(0) // 2
+            cumprob_delta = (cumprob[n_samp:] - cumprob[:n_samp])
+            logprob_delta = (sampled_logprobs[n_samp:] - sampled_logprobs[:n_samp])
+            for i in range(cumprob_delta.size(0)):
+                to_log[f"delta_{i}"] = cumprob_delta[i].item()
+                to_log[f"logprob_delta_{i}"] = logprob_delta[i].item()
+        wandb.log(to_log)
+
     return f"Step {step}: curr_len: {generated.size(1)}, tps: {tps:.2f}"
 
-def initialize_model(tp_rank, device_mesh, device) -> Tuple[LlamaForCausalLM, Emu3Config, LlamaConfig]:
+
+def initialize_model(
+    tp_rank, device_mesh, device
+) -> Tuple[LlamaForCausalLM, Emu3Config, LlamaConfig]:
     # Model initialization with data parallelism
     model_dl = None
     if tp_rank == 0:
@@ -346,6 +377,7 @@ def initialize_model(tp_rank, device_mesh, device) -> Tuple[LlamaForCausalLM, Em
     print(f"State dict loaded in {end_t - start_t:.2f}s")
     return model, config, llama_config
 
+
 def main():
     args = parse_args()
 
@@ -374,12 +406,14 @@ def main():
     num_images: int = args.num_images
     pag_pos: bool = not args.pag_no_pos
     cfg_scale: float = args.cfg_scale
+    cfg_clip_quantile: float = args.cfg_clip_quantile
     pag_scale: float = args.pag_scale
     temperature: float = args.temp
     top_p: float = args.top_p
     top_k: int = args.top_k
     extras_dir: str = args.extras
     null_ident: bool = args.null_ident
+    cfg_logsm: bool = args.cfg_logsm
     del args
 
     torch._inductor.config.coordinate_descent_tuning = True
@@ -387,7 +421,6 @@ def main():
     # Experimental features to reduce compilation times, will be on by default in future
     torch._inductor.config.fx_graph_cache = True
     # torch._functorch.config.enable_autograd_cache = True
-
 
     # Initialize model
     model, config, llama_config = initialize_model(tp_rank, device_mesh, device)
@@ -433,7 +466,9 @@ def main():
     w = inputs.image_size[:, 1]
     constrained_fn = processor.build_prefix_constrained_fn(h, w)
     prefix_proc = PrefixConstrainedLogitsProcessor(constrained_fn)
-    cfg_proc = ClassifierFreeGuidanceLogitsProcessor(cfg_scale, pag_scale)
+    cfg_proc = ClassifierFreeGuidanceLogitsProcessor(
+        cfg_scale, pag_scale, cfg_clip_quantile=cfg_clip_quantile, cfg_logsm=cfg_logsm
+    )
     mask_pos_generator = MaskPosGenerator(
         inputs.attention_mask.to(device),
         is_cfg,
@@ -461,6 +496,7 @@ def main():
             callback=generation_callback,
             config=llama_config,
             tp_rank=tp_rank,
+            callback_kwargs=dict(is_cfg=is_cfg, is_pag=is_pag),
         )
 
     if tp_rank == 0:

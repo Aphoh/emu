@@ -112,11 +112,23 @@ class ClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
     ```
     """
 
-    def __init__(self, cfg_scale, pag_scale):
+    def __init__(self, cfg_scale, pag_scale, cfg_clip_quantile=1.0, cfg_logsm=False):
         assert cfg_scale >= 0, f"`cfg_scale` should be greater than or equal to 0, but got {cfg_scale}."
         assert pag_scale >= 0, f"`pag_scale` should be greater than or equal to 0, but got {pag_scale}."
         self.cfg_scale = cfg_scale
         self.pag_scale = pag_scale
+        self.cfg_clip_quantile = cfg_clip_quantile
+        self.cfg_logsm = cfg_logsm
+
+    def _process_cfg_delta(self, cond: torch.FloatTensor, uncond: torch.FloatTensor) -> torch.FloatTensor:
+        if self.cfg_logsm:
+            cond = torch.log_softmax(cond, dim=-1)
+            uncond = torch.log_softmax(uncond, dim=-1)
+        delta = cond - uncond
+        if self.cfg_clip_quantile < 1:
+            quants = delta.quantile(self.cfg_clip_quantile, dim=-1, keepdim=True)
+            delta = delta.clamp(min=None, max=quants)
+        return delta
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> Tuple[torch.FloatTensor, int]:
         assert scores.shape[0] == input_ids.shape[0], f"input_ids {input_ids.shape} and scores {scores.shape} should have the same batch size."
@@ -124,12 +136,12 @@ class ClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         if self.cfg_scale > 0 and self.pag_scale > 0:
             unguided_bsz = scores.shape[0] // 3
             cond_logits, pag_logits, uncond_logits = scores.split(unguided_bsz, dim=0)
-            scores_processed = cond_logits + (cond_logits - uncond_logits) * self.cfg_scale + (pag_logits - cond_logits) * self.pag_scale
+            scores_processed = cond_logits + self._process_cfg_delta(cond_logits - uncond_logits) * self.cfg_scale + (pag_logits - cond_logits) * self.pag_scale
             return scores_processed, 3
         elif self.cfg_scale > 0 and self.pag_scale == 0:
             unguided_bsz = scores.shape[0] // 2
             cond_logits, uncond_logits = scores.split(unguided_bsz, dim=0)
-            scores_processed = cond_logits + (cond_logits - uncond_logits) * self.cfg_scale
+            scores_processed = cond_logits + self._process_cfg_delta(cond_logits - uncond_logits) * self.cfg_scale
             return scores_processed, 2
         elif self.cfg_scale == 0 and self.pag_scale > 0:
             unguided_bsz = scores.shape[0] // 2

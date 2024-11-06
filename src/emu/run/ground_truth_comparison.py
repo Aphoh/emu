@@ -26,7 +26,7 @@ def main():
     parser.add_argument('image_path', type=str, help='Path to the image file')
     args = parser.parse_args()
 
-    device = torch.device("mps")
+    device = torch.device("cuda:0")
 
     # Initialize wandb
     wandb.init(project='ground_truth_comparison')
@@ -68,20 +68,23 @@ def main():
         tokenizer.eos_token
 
     ) for text in [null_condition, pos_condition]]
-    tokenized = tokenizer(prompts, return_tensors='pt', padding_side="left")
+    tokenized = tokenizer(prompts, return_tensors='pt', padding_side="left", padding=True)
     
 
     # Logits are shape [2, seq_len, vocab_size]
-    img_token_idx = torch.nonzero(tokenized.input_ids[0] == tokenizer.img_token_id, as_tuple=True)[0, 0].item()
-    assert (tokenized.input_ids[:, img_token_idx] == tokenizer.img_token_id).all()
+    img_token_id = tokenizer.encode(tokenizer.img_token)[0]
+    img_token_idx = torch.nonzero(tokenized.input_ids[0] == img_token_id, as_tuple=True)[0][0].item()
+    assert (tokenized.input_ids[:, img_token_idx] == img_token_id).all()
 
-    model, _, _ = initialize_model(EMU_HUB, None, device)
+    model, _, _ = initialize_model(0, None, device)
 
     # run it through the model
-    output = model(input_ids=tokenized.input_ids, attention_mask=tokenized.attention_mask, return_dict=True)
+    input_ids = tokenized.input_ids.to(device)
+    attention_mask = tokenized.attention_mask.to(device)
+    output = model(input_ids=input_ids.to(device), attention_mask=attention_mask.to(device), return_dict=True)
     # Should be shape [2, img_len, vocab_size]
     logprobs = F.log_softmax(output.logits, dim=-1)    
-    target_logprobs = logprobs[:, :-1, :].gather(2, tokenized.input_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
+    target_logprobs = logprobs[:, :-1, :].gather(2, input_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
 
     topk_logprobs, topk_indices = torch.topk(target_logprobs, 100, dim=-1)
 
@@ -89,6 +92,7 @@ def main():
         "topk_logprobs": topk_logprobs,
         "topk_indices": topk_indices,
         "target_logprobs": target_logprobs,
+        "img_token_idx": img_token_idx,
     }
 
     torch.save(output, "/tmp/output.pt")
