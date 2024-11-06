@@ -137,7 +137,7 @@ def generate_step(
         use_cache=True,
         return_dict=True,
     )
-    base_logits = outputs.logits[:, -1, :]
+    base_logits = outputs.logits[:, -1, :].to(torch.float32)
     base_logprobs = F.log_softmax(base_logits, dim=-1)
     past_key_values = outputs.past_key_values
 
@@ -214,7 +214,7 @@ def manual_generate(
     # model.forward = torch.compile(model.forward, mode="reduce-overhead")
 
     if callback is not None:
-        callback(0, 1, generated, generated[:, -1], tp_rank=tp_rank, **callback_kwargs)
+        callback(0, 1, generated, generated[:, -1], extras, tp_rank=tp_rank, **callback_kwargs)
 
     start_t = time.time()
     i = 0
@@ -291,12 +291,12 @@ def parse_args():
     parser.add_argument("--pag_no_pos", action="store_true", help="PAG don't use pos")
     parser.add_argument("--temp", type=float, default=1.0, help="temperature")
     parser.add_argument("--top_p", type=float, help="top p")
-    parser.add_argument("--top_k", type=float, default=2048, help="top k")
+    parser.add_argument("--top_k", type=float, help="top k")
     parser.add_argument(
         "--null_ident", action="store_true", help="null identity matrix in cfg"
     )
     parser.add_argument(
-        "--cfg_clip_quantile", type=float, default=0.0, help="CFG clip quantile"
+        "--cfg_clip_quantile", type=float, default=1.0, help="CFG clip quantile"
     )
     parser.add_argument(
         "--cfg_logsm", action="store_true", help="CFG delta use log softmax"
@@ -333,10 +333,10 @@ def generation_callback(
             to_log[f"sampled_logprob_{i}"] = sampled_logprobs[i].item()
         if is_cfg and not is_pag:
             n_samp = cumprob.size(0) // 2
-            cumprob_delta = (cumprob[n_samp:] - cumprob[:n_samp])
-            logprob_delta = (sampled_logprobs[n_samp:] - sampled_logprobs[:n_samp])
+            cumprob_delta = (cumprob[:n_samp] - cumprob[n_samp:])
+            logprob_delta = (sampled_logprobs[:n_samp] - sampled_logprobs[n_samp:])
             for i in range(cumprob_delta.size(0)):
-                to_log[f"delta_{i}"] = cumprob_delta[i].item()
+                to_log[f"cumprob_delta_{i}"] = cumprob_delta[i].item()
                 to_log[f"logprob_delta_{i}"] = logprob_delta[i].item()
         wandb.log(to_log)
 
@@ -415,6 +415,9 @@ def main():
     null_ident: bool = args.null_ident
     cfg_logsm: bool = args.cfg_logsm
     del args
+    if top_k is None and top_p is None:
+        print("Using default topk=2048 sampling")
+        top_k = 2048
 
     torch._inductor.config.coordinate_descent_tuning = True
     torch._inductor.config.triton.unique_kernel_names = True

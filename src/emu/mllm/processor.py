@@ -136,12 +136,12 @@ class ClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         if self.cfg_scale > 0 and self.pag_scale > 0:
             unguided_bsz = scores.shape[0] // 3
             cond_logits, pag_logits, uncond_logits = scores.split(unguided_bsz, dim=0)
-            scores_processed = cond_logits + self._process_cfg_delta(cond_logits - uncond_logits) * self.cfg_scale + (pag_logits - cond_logits) * self.pag_scale
+            scores_processed = cond_logits + self._process_cfg_delta(cond_logits, uncond_logits) * self.cfg_scale + (pag_logits - cond_logits) * self.pag_scale
             return scores_processed, 3
         elif self.cfg_scale > 0 and self.pag_scale == 0:
             unguided_bsz = scores.shape[0] // 2
             cond_logits, uncond_logits = scores.split(unguided_bsz, dim=0)
-            scores_processed = cond_logits + self._process_cfg_delta(cond_logits - uncond_logits) * self.cfg_scale
+            scores_processed = cond_logits + self._process_cfg_delta(cond_logits, uncond_logits) * self.cfg_scale
             return scores_processed, 2
         elif self.cfg_scale == 0 and self.pag_scale > 0:
             unguided_bsz = scores.shape[0] // 2
