@@ -105,7 +105,7 @@ def generate_step(
     extras=None,
 ):
     input_ids = next_tokens if next_tokens is not None else generated
-    kv_size = past_key_values.get_usable_length() if past_key_values is not None else None
+    kv_size = past_key_values.get_seq_length() if past_key_values is not None else None
     attention_mask, position_ids, cache_position = mask_pos_generator(generated, input_ids, kv_size)
 
     outputs = model_fn(
@@ -271,7 +271,7 @@ def parse_args():
     parser.add_argument("--pag_no_pos", action="store_true", help="PAG don't use pos")
     parser.add_argument("--temp", type=float, default=1.0, help="temperature")
     parser.add_argument("--top_p", type=float, help="top p")
-    parser.add_argument("--top_k", type=float, help="top k")
+    parser.add_argument("--top_k", type=int, help="top k")
     parser.add_argument(
         "--null_ident", action="store_true", help="null identity matrix in cfg"
     )
@@ -285,7 +285,7 @@ def parse_args():
         "--extras", type=str, default="extras", help="directory to store extras"
     )
     parser.add_argument(
-        "--context_bias", type=float, default=0.0, help="use context bias in generation"
+        "--condition_bias", type=float, default=0.0, help="use context bias in generation"
     )
     return parser.parse_args()
 
@@ -397,14 +397,14 @@ def main():
     extras_dir: str = args.extras
     null_ident: bool = args.null_ident
     cfg_logsm: bool = args.cfg_logsm
-    context_bias: float = args.context_bias
-
+    condition_bias: float = args.condition_bias
     del args
+
     if top_k is None and top_p is None:
         print("Using default topk=2048 sampling")
         top_k = 2048
 
-    if context_bias != 0.0:
+    if condition_bias != 0.0:
         assert cfg_scale == 0, "Context bias requires no CFG"
         assert pag_scale == 0, "Context bias requires no PAG"
 
@@ -467,7 +467,7 @@ def main():
         is_pag,
         pag_with_position=pag_pos,
         null_identity_map=null_ident,
-        context_bias=context_bias
+        condition_bias=condition_bias
     )
 
     if is_tp:
