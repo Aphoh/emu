@@ -52,10 +52,8 @@ def prepare_4d_causal_attention_mask_with_cache_position(
         causal_mask *= torch.arange(
             target_length, device=device
         ) > cache_position.reshape(-1, 1)
-        print("causal mask")
-        print(causal_mask.clip(-4, None))
         if context_offset > 0 and context_bias != 0.0:
-            ones = torch.ones(sequence_length, context_offset)
+            ones = torch.ones(sequence_length, context_offset, device=device)
             context_mask = (
                 torch.arange(context_offset, target_length, device=device)
                 > cache_position.reshape(-1, 1) - 1
