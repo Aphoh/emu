@@ -127,7 +127,8 @@ class ClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
         delta = cond - uncond
         if self.cfg_clip_quantile < 1:
             quants = delta.quantile(self.cfg_clip_quantile, dim=-1, keepdim=True)
-            delta = delta.clamp(min=None, max=quants)
+            delta[delta > quants] = -1e15
+            #delta = delta.clamp(min=None, max=quants)
         return delta
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> Tuple[torch.FloatTensor, int]:

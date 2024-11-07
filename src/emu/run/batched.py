@@ -99,34 +99,14 @@ def generate_step(
     top_p,
     top_k,
     next_tokens=None,
-    past_key_values=None,
+    past_key_values: ChunkedDynamicCache = None,
     cfg_proc=None,
     prefix_proc=None,
     extras=None,
 ):
     input_ids = next_tokens if next_tokens is not None else generated
-    attention_mask, position_ids = mask_pos_generator(generated)
-    cache_position = torch.arange(attention_mask.shape[1], device=input_ids.device)[
-        -input_ids.shape[1] :
-    ]
-    position_ids = position_ids[:, -input_ids.shape[1] :]
-    if (
-        isinstance(past_key_values, ChunkedDynamicCache)
-        and past_key_values.get_seq_length() > 0
-    ):
-        kv_size = past_key_values.get_seq_length()
-        # Pad mask to mask the kv len
-        b, s = attention_mask.shape
-        if kv_size - s > 0:
-            to_add = torch.zeros(
-                (b, kv_size - s),
-                device=attention_mask.device,
-                dtype=attention_mask.dtype,
-            )
-            attention_mask = torch.cat([attention_mask, to_add], dim=1)
-
-    # kv_shape = past_key_values.key_cache[0].shape if past_key_values.key_cache else -1
-    # print(f"Attention mask shape: {attention_mask.shape}, cache_kv_len: {kv_shape} input_ids: {input_ids.shape}")
+    kv_size = past_key_values.get_usable_length() if past_key_values is not None else None
+    attention_mask, position_ids, cache_position = mask_pos_generator(generated, input_ids, kv_size)
 
     outputs = model_fn(
         input_ids=input_ids,
@@ -304,6 +284,9 @@ def parse_args():
     parser.add_argument(
         "--extras", type=str, default="extras", help="directory to store extras"
     )
+    parser.add_argument(
+        "--context_bias", type=float, default=0.0, help="use context bias in generation"
+    )
     return parser.parse_args()
 
 
@@ -414,10 +397,16 @@ def main():
     extras_dir: str = args.extras
     null_ident: bool = args.null_ident
     cfg_logsm: bool = args.cfg_logsm
+    context_bias: float = args.context_bias
+
     del args
     if top_k is None and top_p is None:
         print("Using default topk=2048 sampling")
         top_k = 2048
+
+    if context_bias != 0.0:
+        assert cfg_scale == 0, "Context bias requires no CFG"
+        assert pag_scale == 0, "Context bias requires no PAG"
 
     torch._inductor.config.coordinate_descent_tuning = True
     torch._inductor.config.triton.unique_kernel_names = True
@@ -478,6 +467,7 @@ def main():
         is_pag,
         pag_with_position=pag_pos,
         null_identity_map=null_ident,
+        context_bias=context_bias
     )
 
     if is_tp:
