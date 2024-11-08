@@ -112,37 +112,36 @@ class ClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
     ```
     """
 
-    def __init__(self, cfg_scale, pag_scale, cfg_clip_quantile=1.0, cfg_logsm=False):
+    def __init__(self, cfg_scale, pag_scale, cd_beta, cfg_clip_quantile=1.0, cfg_logsm=False, cd_alpha=0.5):
         assert cfg_scale >= 0, f"`cfg_scale` should be greater than or equal to 0, but got {cfg_scale}."
         assert pag_scale >= 0, f"`pag_scale` should be greater than or equal to 0, but got {pag_scale}."
         self.cfg_scale = cfg_scale
         self.pag_scale = pag_scale
         self.cfg_clip_quantile = cfg_clip_quantile
         self.cfg_logsm = cfg_logsm
-
-    def _process_cfg_delta(self, cond: torch.FloatTensor, uncond: torch.FloatTensor) -> torch.FloatTensor:
-        if self.cfg_logsm:
-            cond = torch.log_softmax(cond, dim=-1)
-            uncond = torch.log_softmax(uncond, dim=-1)
-        delta = cond - uncond
-        if self.cfg_clip_quantile < 1:
-            quants = delta.quantile(self.cfg_clip_quantile, dim=-1, keepdim=True)
-            delta[delta > quants] = -1e15
-            #delta = delta.clamp(min=None, max=quants)
-        return delta
+        self.cd_beta = cd_beta
+        self.cd_alpha = cd_alpha
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> Tuple[torch.FloatTensor, int]:
         assert scores.shape[0] == input_ids.shape[0], f"input_ids {input_ids.shape} and scores {scores.shape} should have the same batch size."
 
-        if self.cfg_scale > 0 and self.pag_scale > 0:
+        if self.cfg_scale > 0 and self.cd_beta > 0:
             unguided_bsz = scores.shape[0] // 3
             cond_logits, pag_logits, uncond_logits = scores.split(unguided_bsz, dim=0)
-            scores_processed = cond_logits + self._process_cfg_delta(cond_logits, uncond_logits) * self.cfg_scale + (pag_logits - cond_logits) * self.pag_scale
+            scores_processed = (1 + self.cfg_scale) * cond_logits - self.cfg_scale * uncond_logits 
+            cutoff = math.log(self.cd_alpha) + scores_processed.max(dim=-1, keepdim=True).values
+            diffs = (1 + self.cd_beta) * scores_processed - self.cd_beta * pag_logits
+            scores_processed = diffs.masked_fill(diffs < cutoff, -1e15)
+            return scores_processed, 3
+        elif self.cfg_scale > 0 and self.pag_scale > 0:
+            unguided_bsz = scores.shape[0] // 3
+            cond_logits, pag_logits, uncond_logits = scores.split(unguided_bsz, dim=0)
+            scores_processed = cond_logits + (cond_logits - uncond_logits) * self.cfg_scale + (pag_logits - cond_logits) * self.pag_scale
             return scores_processed, 3
         elif self.cfg_scale > 0 and self.pag_scale == 0:
             unguided_bsz = scores.shape[0] // 2
             cond_logits, uncond_logits = scores.split(unguided_bsz, dim=0)
-            scores_processed = cond_logits + self._process_cfg_delta(cond_logits, uncond_logits) * self.cfg_scale
+            scores_processed = cond_logits + (cond_logits - uncond_logits) * self.cfg_scale
             return scores_processed, 2
         elif self.cfg_scale == 0 and self.pag_scale > 0:
             unguided_bsz = scores.shape[0] // 2

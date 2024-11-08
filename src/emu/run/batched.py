@@ -268,6 +268,8 @@ def parse_args():
     )
     parser.add_argument("--cfg_scale", type=float, default=0.0, help="CFG scale")
     parser.add_argument("--pag_scale", type=float, default=0.0, help="PAG scale")
+    parser.add_argument("--cd_beta", type=float, default=0.0, help="PAG scale")
+    parser.add_argument("--cd_alpha", type=float, default=0.5, help="PAG scale")
     parser.add_argument("--pag_no_pos", action="store_true", help="PAG don't use pos")
     parser.add_argument("--temp", type=float, default=1.0, help="temperature")
     parser.add_argument("--top_p", type=float, help="top p")
@@ -391,6 +393,8 @@ def main():
     cfg_scale: float = args.cfg_scale
     cfg_clip_quantile: float = args.cfg_clip_quantile
     pag_scale: float = args.pag_scale
+    cd_beta: float = args.cd_beta
+    cd_alpha: float = args.cd_alpha
     temperature: float = args.temp
     top_p: float = args.top_p
     top_k: int = args.top_k
@@ -459,7 +463,7 @@ def main():
     constrained_fn = processor.build_prefix_constrained_fn(h, w)
     prefix_proc = PrefixConstrainedLogitsProcessor(constrained_fn)
     cfg_proc = ClassifierFreeGuidanceLogitsProcessor(
-        cfg_scale, pag_scale, cfg_clip_quantile=cfg_clip_quantile, cfg_logsm=cfg_logsm
+        cfg_scale, pag_scale, cd_beta=cd_beta, cfg_clip_quantile=cfg_clip_quantile, cfg_logsm=cfg_logsm, cd_alpha=cd_alpha
     )
     mask_pos_generator = MaskPosGenerator(
         inputs.attention_mask.to(device),
