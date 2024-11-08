@@ -438,7 +438,7 @@ def main():
 
     # Prepare input
     is_cfg = cfg_scale > 0
-    is_pag = pag_scale > 0
+    is_pag = pag_scale > 0 or cd_beta > 0
 
     pos_prompts = []
     for prompt in prompts:
@@ -479,6 +479,13 @@ def main():
         print("Rank ", tp_rank, "sharded model between", device_mesh.size(), "devices")
 
     # Manual generation
+    print("Initial input size", inputs.input_ids.size())
+    print("is_cfg:", is_cfg)
+    print("is_pag:", is_pag)
+    print("got num prompts", len(prompts))
+    print("num images", num_images)
+    print("num pos prompts", len(neg_prompts))
+    print("num neg prompts", len(neg_prompts))
     with torch.no_grad():
         generated_tokens, extras = manual_generate(
             model=model,
