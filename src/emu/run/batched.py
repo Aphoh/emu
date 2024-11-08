@@ -289,6 +289,9 @@ def parse_args():
     parser.add_argument(
         "--condition_bias", type=float, default=0.0, help="use context bias in generation"
     )
+    parser.add_argument(
+        "-t", '--tag', action='append', help="tags for wandb"
+    )
     return parser.parse_args()
 
 
@@ -374,7 +377,7 @@ def main():
 
     if tp_rank == 0:
         print("Initializing wandb")
-        wandb.init(project="cfg-stuff", config=vars(args))
+        wandb.init(project="cfg-stuff", config=vars(args), tags=args.tag)
 
     device_mesh = None
     if is_tp:
